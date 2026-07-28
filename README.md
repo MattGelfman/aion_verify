@@ -51,7 +51,7 @@ assert!(v.is_proven());
 ## API
 
 | Combinator | Domain |
-|---|---|
+| --- | --- |
 | `for_all(iter, pred)` | every item of any finite iterator |
 | `for_all_where(iter, precond, pred)` | items satisfying a precondition (like a `kani::assume` guard) |
 | `for_all_u8(pred)` | the full `u8` domain (256 values) |
