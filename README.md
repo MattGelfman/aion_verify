@@ -1,0 +1,74 @@
+# aion_verify
+
+[![crates.io](https://img.shields.io/crates/v/aion_verify.svg)](https://crates.io/crates/aion_verify)
+[![docs.rs](https://docs.rs/aion_verify/badge.svg)](https://docs.rs/aion_verify)
+[![license](https://img.shields.io/crates/l/aion_verify.svg)](#license)
+
+**An exhaustive bounded proof engine for Rust.** Check a predicate against **every** input in a
+finite or bounded domain and get back either a proof (`Proven { cases }` — complete coverage) or the
+**exact counterexample** that broke it (`Refuted`). Not a random sample — the whole space.
+
+- **`no_std`**, **zero dependencies**, `#![forbid(unsafe_code)]`.
+- A real *proof* over the domain, not property-based fuzzing: if it says `Proven`, every input was checked.
+- Returns the counterexample on failure, so a red result is immediately actionable.
+
+## Why
+
+Property-based testing (proptest, quickcheck) *samples* an input space and can miss the one value that
+breaks your invariant. Symbolic model checkers (like [Kani](https://github.com/model-checking/kani))
+prove properties over astronomically large spaces with a SAT/SMT backend, but need a toolchain and can
+be slow. For the very common case of a **finite or small bounded** domain — every `u8`, a range, a
+cartesian product of a few slices — you can just check *all of it*, fast, in plain safe Rust. That's
+`aion_verify`.
+
+It was built as the tier-4 engine of the AION OS verification stack, alongside Kani as the independent
+tier-5 formal check. It complements Kani; it does not replace it.
+
+## Example
+
+```rust
+use aion_verify::{for_all_u8, for_all_in, for_all_pairs};
+
+// Prove a property over the entire u8 domain (all 256 values):
+let v = for_all_u8(|x| (x as u16) + 1 > x as u16);
+assert!(v.is_proven());
+assert_eq!(v.cases(), 256); // every input checked — a proof
+
+// A failing property hands you the counterexample:
+let v = for_all_u8(|x| x < 200);
+assert_eq!(v.counterexample(), Some(&200u8));
+
+// Bounded ranges and cartesian products of finite domains:
+let v = for_all_in(0, 1000, |x| x * 2 >= x);
+assert!(v.is_proven());
+
+let a = [1u32, 2, 3];
+let b = [10u32, 20];
+let v = for_all_pairs(&a, &b, |&x, &y| x + y == y + x);
+assert!(v.is_proven());
+```
+
+## API
+
+| Combinator | Domain |
+|---|---|
+| `for_all(iter, pred)` | every item of any finite iterator |
+| `for_all_where(iter, precond, pred)` | items satisfying a precondition (like a `kani::assume` guard) |
+| `for_all_u8(pred)` | the full `u8` domain (256 values) |
+| `for_all_in(lo, hi, pred)` | the inclusive range `[lo, hi]` |
+| `for_all_pairs(&a, &b, pred)` | the cartesian product `a × b` (binary invariants) |
+
+Each returns a `Verdict<T>`: `is_proven()`, `cases()`, and `counterexample() -> Option<&T>`.
+
+## When to reach for something else
+
+`aion_verify` **enumerates**, so it's for domains you can actually iterate. For unbounded or
+astronomically large spaces, use a symbolic tool like [Kani](https://github.com/model-checking/kani)
+(the two pair well: prove the small/bounded cases exhaustively here, the large cases symbolically there).
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT)
+at your option. Unless you explicitly state otherwise, any contribution intentionally submitted for
+inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above,
+without any additional terms or conditions.
