@@ -170,6 +170,40 @@ fn refinement_is_honest_when_the_budget_runs_out() {
     );
 }
 
+// ── Phase D — affine relational reasoning (shared variables, no splitting) ─────────────────────────
+
+#[test]
+fn relational_proves_a_shared_variable_fact_without_splitting() {
+    // ∀ x0,x1 ∈ [0, 1e9]: x0 <= x0 + x1. The two x0's are the SAME value — the interval domain can't
+    // see that, but the affine layer cancels them (x0 - (x0+x1) = -x1 <= 0) and proves it directly.
+    let d = &[Iv::new(0, 1_000_000_000), Iv::new(0, 1_000_000_000)];
+    let p = Prop::Le(Expr::var_at(0), Expr::var_at(0).add(Expr::var_at(1)));
+    assert_eq!(prove_forall_n(d, &p), SymVerdict::Proven);
+}
+
+#[test]
+fn relational_proves_commutativity() {
+    // ∀ x0,x1: x0 + x1 == x1 + x0 (over a non-overflowing domain) — the affine difference is identically 0.
+    let d = &[Iv::new(0, 1_000_000), Iv::new(0, 1_000_000)];
+    let lhs = Expr::var_at(0).add(Expr::var_at(1));
+    let rhs = Expr::var_at(1).add(Expr::var_at(0));
+    assert_eq!(prove_forall_n(d, &Prop::Eq(lhs, rhs)), SymVerdict::Proven);
+}
+
+#[test]
+fn relational_is_sound_under_wrapping() {
+    // x0 <= x0 + x1 is NOT true over the FULL u64 domain: when x0 + x1 wraps, the sum is < x0. The
+    // affine layer must NOT apply here (overflow), and the engine must not falsely prove it — it finds
+    // the wrapping counterexample instead. Soundness over the shortcut.
+    let d = &[Iv::full(), Iv::full()];
+    let p = Prop::Le(Expr::var_at(0), Expr::var_at(0).add(Expr::var_at(1)));
+    assert_ne!(
+        prove_forall_n(d, &p),
+        SymVerdict::Proven,
+        "must never falsely prove a wrapping case"
+    );
+}
+
 #[test]
 fn u64_max_boundary_is_safe() {
     // Reasoning at the very top of the domain must never overflow or panic.

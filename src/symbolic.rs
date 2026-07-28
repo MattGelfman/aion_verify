@@ -298,12 +298,12 @@ impl Prop {
 
     fn eval_iv(&self, doms: &[Iv]) -> Tri {
         match self {
-            Prop::Le(a, b) => cmp_le(a.eval_iv(doms), b.eval_iv(doms)),
-            Prop::Lt(a, b) => cmp_lt(a.eval_iv(doms), b.eval_iv(doms)),
-            Prop::Ge(a, b) => cmp_le(b.eval_iv(doms), a.eval_iv(doms)),
-            Prop::Gt(a, b) => cmp_lt(b.eval_iv(doms), a.eval_iv(doms)),
-            Prop::Eq(a, b) => cmp_eq(a.eval_iv(doms), b.eval_iv(doms)),
-            Prop::Ne(a, b) => cmp_eq(a.eval_iv(doms), b.eval_iv(doms)).negate(),
+            Prop::Le(a, b) => cmp_le_full(a, b, doms),
+            Prop::Lt(a, b) => cmp_lt_full(a, b, doms),
+            Prop::Ge(a, b) => cmp_le_full(b, a, doms),
+            Prop::Gt(a, b) => cmp_lt_full(b, a, doms),
+            Prop::Eq(a, b) => cmp_eq_full(a, b, doms),
+            Prop::Ne(a, b) => cmp_eq_full(a, b, doms).negate(),
             Prop::And(p, q) => p.eval_iv(doms).and(q.eval_iv(doms)),
             Prop::Or(p, q) => p.eval_iv(doms).or(q.eval_iv(doms)),
             Prop::Not(p) => p.eval_iv(doms).negate(),
@@ -325,6 +325,144 @@ impl Prop {
             Prop::Implies(p, q) => !p.eval_at(xs) || q.eval_at(xs),
         }
     }
+}
+
+// ── Phase D: affine (linear) relational reasoning ─────────────────────────────────────────────────
+//
+// A plain interval domain evaluates each occurrence of a variable independently, so it can't see that
+// the two `x`s in `x <= x + y` are the *same* value. Representing the LINEAR fragment as an affine form
+// `c + Σ cᵢ·vᵢ` lets a comparison `a ≤ b` be decided from the bounds of `a − b`, where shared terms
+// cancel (`x − (x + y) = −y`) — proving relational facts with no splitting.
+//
+// SOUNDNESS vs u64 wrapping: the affine form is exact integer math, but the engine's semantics are
+// *wrapping* u64. We only use affine reasoning when it provably matches: the fragment is built solely
+// from non-negative, non-decreasing ops (Var / Const / Add / Mul-by-const / Shl), so every value is
+// ≥ 0, and we require each operand's maximum over the domain to be ≤ u64::MAX (no overflow). Under
+// those two conditions the u64 value equals the integer value, so the u64 comparison equals the
+// integer one. Anything else (Sub, Shr, And, Or, Rem, var·var) is not affine here and falls back to
+// the interval comparison — never an unsound shortcut.
+
+/// A linear form `c + Σ coeffs[(var, coeff)]` over `i128` (wide enough that sums/differences of u64
+/// magnitudes never overflow).
+struct Affine {
+    c: i128,
+    coeffs: Vec<(u32, i128)>,
+}
+
+impl Affine {
+    fn add(mut self, o: Affine) -> Affine {
+        self.c += o.c;
+        for (v, k) in o.coeffs {
+            match self.coeffs.iter_mut().find(|(vv, _)| *vv == v) {
+                Some(e) => e.1 += k,
+                None => self.coeffs.push((v, k)),
+            }
+        }
+        self
+    }
+    fn scale(mut self, s: i128) -> Affine {
+        self.c *= s;
+        for e in self.coeffs.iter_mut() {
+            e.1 *= s;
+        }
+        self
+    }
+    fn neg(self) -> Affine {
+        self.scale(-1)
+    }
+    /// The (min, max) of this form over the variable domains, exact in `i128`.
+    fn bounds(&self, doms: &[Iv]) -> (i128, i128) {
+        let mut lo = self.c;
+        let mut hi = self.c;
+        for &(v, k) in &self.coeffs {
+            let d = doms.get(v as usize).copied().unwrap_or_else(Iv::full);
+            let (dl, dh) = (d.lo as i128, d.hi as i128);
+            if k >= 0 {
+                lo += k * dl;
+                hi += k * dh;
+            } else {
+                lo += k * dh;
+                hi += k * dl;
+            }
+        }
+        (lo, hi)
+    }
+}
+
+/// The affine form of the linear fragment (`None` for anything non-linear or possibly-negative).
+fn to_affine(e: &Expr) -> Option<Affine> {
+    match e {
+        Expr::Var(i) => Some(Affine {
+            c: 0,
+            coeffs: alloc::vec![(*i, 1)],
+        }),
+        Expr::Const(v) => Some(Affine {
+            c: *v as i128,
+            coeffs: Vec::new(),
+        }),
+        Expr::Add(a, b) => Some(to_affine(a)?.add(to_affine(b)?)),
+        Expr::Mul(a, b) => {
+            let (af, bf) = (to_affine(a)?, to_affine(b)?);
+            if af.coeffs.is_empty() {
+                Some(bf.scale(af.c))
+            } else if bf.coeffs.is_empty() {
+                Some(af.scale(bf.c))
+            } else {
+                None // var·var is non-linear
+            }
+        }
+        Expr::Shl(a, k) if *k < 63 => Some(to_affine(a)?.scale(1i128 << k)),
+        // Sub can go negative (u64 wrap); Shr/And/Or/Rem are non-linear — fall back to intervals.
+        _ => None,
+    }
+}
+
+/// If both sides are affine and provably non-wrapping over the domain, decide `a - b` vs 0 relationally.
+/// Returns `None` when affine reasoning doesn't apply (caller falls back to the interval comparison).
+fn affine_diff(a: &Expr, b: &Expr, doms: &[Iv]) -> Option<(i128, i128)> {
+    let (af, bf) = (to_affine(a)?, to_affine(b)?);
+    const MAX: i128 = u64::MAX as i128;
+    // No overflow in computing either operand (both are ≥ 0 by construction of the fragment).
+    if af.bounds(doms).1 > MAX || bf.bounds(doms).1 > MAX {
+        return None;
+    }
+    Some(af.add(bf.neg()).bounds(doms)) // bounds of (a - b)
+}
+
+fn cmp_le_full(a: &Expr, b: &Expr, doms: &[Iv]) -> Tri {
+    if let Some((dlo, dhi)) = affine_diff(a, b, doms) {
+        if dhi <= 0 {
+            return Tri::True; // a - b <= 0 everywhere
+        }
+        if dlo > 0 {
+            return Tri::False;
+        }
+    }
+    cmp_le(a.eval_iv(doms), b.eval_iv(doms))
+}
+
+fn cmp_lt_full(a: &Expr, b: &Expr, doms: &[Iv]) -> Tri {
+    if let Some((dlo, dhi)) = affine_diff(a, b, doms) {
+        if dhi < 0 {
+            return Tri::True;
+        }
+        if dlo >= 0 {
+            return Tri::False;
+        }
+    }
+    cmp_lt(a.eval_iv(doms), b.eval_iv(doms))
+}
+
+fn cmp_eq_full(a: &Expr, b: &Expr, doms: &[Iv]) -> Tri {
+    if let Some((dlo, dhi)) = affine_diff(a, b, doms) {
+        if dlo == 0 && dhi == 0 {
+            return Tri::True; // a - b is identically 0
+        }
+        if dlo > 0 || dhi < 0 {
+            return Tri::False; // 0 not attainable
+        }
+    }
+    cmp_eq(a.eval_iv(doms), b.eval_iv(doms))
 }
 
 fn cmp_le(a: Iv, b: Iv) -> Tri {

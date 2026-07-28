@@ -8,7 +8,7 @@
 //!   P3 altering ANY past record's payload is detected by verify() (tamper-evidence).
 //!   P4 deleting a record from the middle is detected (the log can't be silently cut).
 
-use aion_verify::ledger::{sha256, Ledger};
+use aion_verify::ledger::{sha512, Ledger};
 
 fn hex(b: &[u8]) -> String {
     let mut s = String::new();
@@ -19,27 +19,27 @@ fn hex(b: &[u8]) -> String {
 }
 
 #[test]
-fn sha256_matches_fips_known_answers() {
+fn sha512_matches_fips_known_answers() {
     assert_eq!(
-        hex(&sha256(b"")),
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        hex(&sha512(b"")),
+        "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
     );
     assert_eq!(
-        hex(&sha256(b"abc")),
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        hex(&sha512(b"abc")),
+        "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
     );
     assert_eq!(
-        hex(&sha256(
+        hex(&sha512(
             b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
         )),
-        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        "204a8fc6dda82f0a0ced7beb8e08a41657c16ef468b228a8279be331a703c33596fd15c13b1b07f9aa1d3bea57789ca031ad85c7a71dd70354ec631238ca3445"
     );
 }
 
 #[test]
 fn a_well_formed_chain_verifies_and_the_head_moves() {
     let mut l = Ledger::new();
-    assert_eq!(l.head(), [0u8; 32], "empty ledger has a zero head");
+    assert_eq!(l.head(), [0u8; 64], "empty ledger has a zero head");
     let h1 = l.record("x+1 > x over u8", true);
     let h2 = l.record("x <= 100 over u64", false); // a REFUTED result is recorded too
     let h3 = l.record("(x>>1) <= x refined", true);

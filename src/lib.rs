@@ -26,9 +26,13 @@ extern crate alloc;
 /// properties over *all* of `u64` without enumerating it, entirely in first-party Rust. See [`symbolic`].
 pub mod symbolic;
 
-/// A tamper-evident, append-only hash-chain [`ledger`] (with a pure-Rust SHA-256) for recording proof
+/// A tamper-evident, append-only hash-chain [`ledger`] (with a pure-Rust SHA-512) for recording proof
 /// results so they cannot be forged or silently deleted.
 pub mod ledger;
+
+/// Post-quantum authenticity: a hash-based (WOTS) [`pqsig`] signature over the ledger head, so the log
+/// is provably yours and immune to Shor's algorithm — using only SHA-512, still zero-dependency.
+pub mod pqsig;
 
 /// The outcome of a proof attempt over a domain.
 #[derive(Clone, Debug, PartialEq, Eq)]

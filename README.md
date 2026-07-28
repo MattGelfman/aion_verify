@@ -112,30 +112,43 @@ assert_eq!(prove_forall_refine(&[Iv::full()], &p, 256), SymVerdict::Proven);
 ## Tamper-evident proof ledger (`ledger` module)
 
 A proof is only trustworthy if its result can't be quietly forged or deleted. `ledger` records each
-verdict in a **hash chain** (with a self-contained pure-Rust **SHA-256**): every entry carries the hash
+verdict in a **hash chain** (with a self-contained pure-Rust **SHA-512**): every entry carries the hash
 of the one before it, so altering *any* past record — or deleting one — changes every hash after it and
 is caught by `verify()`.
 
 ```rust
 use aion_verify::ledger::Ledger;
+use aion_verify::pqsig::{keygen, sign, verify};
 
 let mut log = Ledger::new();
 log.record("x + 1 > x over u8", true);   // a proven result
 log.record("x <= 100 over u64", false);  // a refuted result, recorded just the same
-let anchor = log.head();                 // 32-byte fingerprint of the whole history
-
+let head = log.head();                   // 64-byte fingerprint of the whole history
 assert_eq!(log.verify(), Ok(()));        // an untampered chain verifies
-// Persist the entries, reload with Ledger::from_entries(..), and verify() again to detect any
-// on-disk tampering. Publish `anchor` somewhere out of the writer's control and a later divergence
-// is proof the log was cut or rewritten.
+
+// Sign the head with a POST-QUANTUM (hash-based WOTS) signature so the log is provably yours:
+let seed = [7u8; 64];                    // one-time secret; never reuse
+let public_key = keygen(&seed);          // publish this as the anchor
+let seal = sign(&seed, &head);
+assert!(verify(&public_key, &head, &seal));
 ```
 
-It's a blockchain's core guarantee (an immutable, verifiable history) without the distributed-consensus
-machinery a single authority doesn't need.
+Persist the entries, reload with `Ledger::from_entries(..)`, and `verify()` again to detect any on-disk
+tampering. Publish the public key + signed head; a later divergence is proof the log was cut or rewritten.
+
+**Post-quantum.** The whole scheme rests only on SHA-512 — hashes are quantum-resistant (Grover is just a
+quadratic speedup, and SHA-512 keeps a full 256-bit collision margin), and the signature is hash-based
+(WOTS), so nothing here falls to Shor's algorithm. No RSA/ECC anywhere. It's a blockchain's core guarantee
+(an immutable, verifiable, *signed* history) without the distributed-consensus machinery a single
+authority doesn't need. (WOTS is one-time per key — lift to many-time with XMSS/SPHINCS+ over the same
+primitive.)
 
 ## When to reach for something else
 
-Refinement is bounded by its split budget, and neither it nor the interval domain handles arbitrary
+Linear relational facts (a variable compared against a linear combination of itself and others, like
+`x <= x + y`) are proven directly by an **affine layer** that cancels shared terms — no splitting, sound
+under u64 wrapping (it only applies where the operands provably can't overflow). Beyond that, refinement
+is bounded by its split budget, and neither it nor the interval domain handles arbitrary
 non-linear or unbounded-arity logic. For those, a mature symbolic tool such as
 [Kani](https://github.com/model-checking/kani) remains a good complement while this engine's decision
 procedures grow.
