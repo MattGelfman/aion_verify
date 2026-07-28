@@ -57,7 +57,10 @@ where
     let mut n = 0u64;
     for x in inputs {
         if !pred(&x) {
-            return Verdict::Refuted { counterexample: x, checked: n };
+            return Verdict::Refuted {
+                counterexample: x,
+                checked: n,
+            };
         }
         n += 1;
     }
@@ -78,7 +81,10 @@ where
             continue;
         }
         if !pred(&x) {
-            return Verdict::Refuted { counterexample: x, checked: n };
+            return Verdict::Refuted {
+                counterexample: x,
+                checked: n,
+            };
         }
         n += 1;
     }
@@ -97,12 +103,19 @@ pub fn for_all_in<F: Fn(u64) -> bool>(lo: u64, hi: u64, pred: F) -> Verdict<u64>
 
 /// Exhaustive proof over the cartesian product of two finite domains (binary invariants). Returns the
 /// `(a, b)` pair that breaks `pred`, if any.
-pub fn for_all_pairs<A: Clone, B: Clone, F: Fn(&A, &B) -> bool>(a: &[A], b: &[B], pred: F) -> Verdict<(A, B)> {
+pub fn for_all_pairs<A: Clone, B: Clone, F: Fn(&A, &B) -> bool>(
+    a: &[A],
+    b: &[B],
+    pred: F,
+) -> Verdict<(A, B)> {
     let mut n = 0u64;
     for x in a {
         for y in b {
             if !pred(x, y) {
-                return Verdict::Refuted { counterexample: (x.clone(), y.clone()), checked: n };
+                return Verdict::Refuted {
+                    counterexample: (x.clone(), y.clone()),
+                    checked: n,
+                };
             }
             n += 1;
         }
@@ -126,7 +139,11 @@ mod tests {
         let v = for_all_u8(|x| x < 200);
         assert!(!v.is_proven());
         assert_eq!(v.counterexample(), Some(&200u8));
-        assert_eq!(v.cases(), 200, "200 values passed before the counterexample");
+        assert_eq!(
+            v.cases(),
+            200,
+            "200 values passed before the counterexample"
+        );
     }
 
     #[test]
@@ -151,7 +168,11 @@ mod tests {
         assert!(good.is_proven());
         assert_eq!(good.cases(), 6, "3 x 2 pairs all checked");
         let bad = for_all_pairs(&a, &b, |&x, &y| x + y != 12);
-        assert_eq!(bad.counterexample(), Some(&(2u32, 10u32)), "2+10==12 breaks it");
+        assert_eq!(
+            bad.counterexample(),
+            Some(&(2u32, 10u32)),
+            "2+10==12 breaks it"
+        );
     }
 }
 

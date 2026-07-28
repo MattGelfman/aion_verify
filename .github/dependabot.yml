@@ -1,0 +1,24 @@
+version: 2
+updates:
+  # Rust dependencies. aion_verify has zero runtime deps today, but this keeps any future dep — and the
+  # dev/CI toolchain — patched, and every Dependabot PR is scanned by the CI workflow before it can merge.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps"
+    labels:
+      - "dependencies"
+
+  # Keep the GitHub Actions used by CI current (this is where Dependabot has real work on a zero-dep crate).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
+      - "github-actions"
