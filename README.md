@@ -79,7 +79,21 @@ let q = Prop::Le(Expr::var(), Expr::c(100));
 matches!(prove_forall(Iv::full(), &q), SymVerdict::Refuted { .. });
 ```
 
-`SymVerdict` is `Proven` (holds for all), `Refuted { witness }` (a real counterexample), or `Unknown`
+**Multiple variables and function contracts.** Variables are addressed by index (`Expr::var_at(i)`),
+and `prove_contract(&doms, &precond, &postcond)` proves `precond -> postcond` over the variables'
+domains — the core of verifying a function or component (validate inputs, guarantee the postcondition):
+
+```rust
+use aion_verify::symbolic::{prove_contract, Expr, Iv, Prop, SymVerdict};
+
+// Contract over x ∈ [0,1000]: if x <= 1000 then x + 1 <= 1001.
+let pre  = Prop::Le(Expr::var(), Expr::c(1000));
+let post = Prop::Le(Expr::var().add(Expr::c(1)), Expr::c(1001));
+assert_eq!(prove_contract(&[Iv::new(0, 1000)], &pre, &post), SymVerdict::Proven);
+```
+
+`SymVerdict` is `Proven` (holds for all), `Refuted { witness }` (a real counterexample — a value per
+variable), or `Unknown`
 (the interval abstraction was too weak) — **never a false Proven or Refuted**. Pure Rust, no external
 solver.
 

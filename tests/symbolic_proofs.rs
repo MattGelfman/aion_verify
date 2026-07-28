@@ -6,7 +6,9 @@
 //! plus concrete-witness refutation and honest `Unknown` where the interval domain is too weak. The
 //! last one is the important one: it demonstrates the engine never returns a false Proven/Refuted.
 
-use aion_verify::symbolic::{prove_forall, Expr, Iv, Prop, SymVerdict};
+use aion_verify::symbolic::{
+    prove_contract, prove_forall, prove_forall_n, Expr, Iv, Prop, SymVerdict,
+};
 
 #[test]
 fn proves_mask_bound_over_all_of_u64() {
@@ -53,7 +55,7 @@ fn refutes_with_a_confirmed_witness() {
     let p = Prop::Le(Expr::var(), Expr::c(100));
     match prove_forall(Iv::full(), &p) {
         SymVerdict::Refuted { witness } => {
-            assert!(witness > 100, "witness {witness} must break x<=100")
+            assert!(witness[0] > 100, "witness {:?} must break x<=100", witness)
         }
         v => panic!("expected Refuted, got {v:?}"),
     }
@@ -64,7 +66,60 @@ fn refutes_a_too_tight_mask_bound() {
     // ∀ x: (x & 0xFF) <= 100 — false, since low byte can reach 255.
     let p = Prop::Le(Expr::var().and(0xFF), Expr::c(100));
     match prove_forall(Iv::full(), &p) {
-        SymVerdict::Refuted { witness } => assert!((witness & 0xFF) > 100),
+        SymVerdict::Refuted { witness } => assert!((witness[0] & 0xFF) > 100),
+        v => panic!("expected Refuted, got {v:?}"),
+    }
+}
+
+// ── Phase B — multiple variables + function contracts ──────────────────────────────────────────────
+
+#[test]
+fn proves_a_multi_variable_property() {
+    // ∀ x0 ∈ [0,100], x1 ∈ [0,100]: x0 + x1 <= 200 (the add can't overflow in range).
+    let sum = Expr::var_at(0).add(Expr::var_at(1));
+    let p = Prop::Le(sum, Expr::c(200));
+    assert_eq!(
+        prove_forall_n(&[Iv::new(0, 100), Iv::new(0, 100)], &p),
+        SymVerdict::Proven
+    );
+}
+
+#[test]
+fn refutes_a_multi_variable_property_with_a_full_assignment() {
+    // ∀ x0,x1 ∈ [0,100]: x0 + x1 <= 150 — false (100+100=200). Witness names BOTH variables.
+    let sum = Expr::var_at(0).add(Expr::var_at(1));
+    let p = Prop::Le(sum, Expr::c(150));
+    match prove_forall_n(&[Iv::new(0, 100), Iv::new(0, 100)], &p) {
+        SymVerdict::Refuted { witness } => {
+            assert_eq!(witness.len(), 2, "witness assigns both variables");
+            assert!(
+                witness[0] + witness[1] > 150,
+                "witness {:?} really breaks it",
+                witness
+            );
+        }
+        v => panic!("expected Refuted, got {v:?}"),
+    }
+}
+
+#[test]
+fn proves_a_function_contract() {
+    // Contract: for x in [0,1000], if x <= 1000 then x + 1 <= 1001. (precond -> postcond)
+    let pre = Prop::Le(Expr::var(), Expr::c(1000));
+    let post = Prop::Le(Expr::var().add(Expr::c(1)), Expr::c(1001));
+    assert_eq!(
+        prove_contract(&[Iv::new(0, 1000)], &pre, &post),
+        SymVerdict::Proven
+    );
+}
+
+#[test]
+fn refutes_a_false_contract_with_a_witness() {
+    // Contract that's FALSE: for x in [0,1000], if x <= 1000 then x <= 999. Broken at x=1000.
+    let pre = Prop::Le(Expr::var(), Expr::c(1000));
+    let post = Prop::Le(Expr::var(), Expr::c(999));
+    match prove_contract(&[Iv::new(0, 1000)], &pre, &post) {
+        SymVerdict::Refuted { witness } => assert_eq!(witness, vec![1000]),
         v => panic!("expected Refuted, got {v:?}"),
     }
 }

@@ -6,29 +6,33 @@
 //!
 //! Tier 4 ([`crate::for_all`]) enumerates: it proves a property by checking every value, so it can only
 //! cover finite/bounded domains. Tier 5 proves properties over the **entire** domain — including all
-//! 2^64 values of `u64` — **without enumerating it**, by *interval abstract interpretation*: it computes,
-//! for each sub-expression, an interval guaranteed to contain every value that expression can take, then
-//! decides the property over those intervals.
+//! 2^64 values of `u64`, over any number of variables — **without enumerating it**, by *interval
+//! abstract interpretation*: it computes, for each sub-expression, an interval guaranteed to contain
+//! every value that expression can take, then decides the property over those intervals.
 //!
 //! Because tier 5 must *reason about* an expression rather than merely call it, its predicates are a
-//! small first-party [`Expr`]/[`Prop`] DSL (an opaque `Fn` can't be analysed — only executed).
+//! small first-party [`Expr`]/[`Prop`] DSL (an opaque `Fn` can't be analysed — only executed). Variables
+//! are addressed by index ([`Expr::var_at`]); [`Expr::var`] is variable 0.
+//!
+//! **Function contracts** — the workhorse of component/kernel verification — are [`prove_contract`]:
+//! prove that a postcondition holds whenever a precondition does, over the variables' domains.
 //!
 //! **Soundness is the whole point** — the interval transfer functions always *over-approximate* (the
 //! true set of values is a subset of the computed interval), and every uncertain case degrades to
 //! [`SymVerdict::Unknown`] rather than guessing:
-//!  - [`SymVerdict::Proven`] — the property holds for **every** value in the domain (a real proof).
-//!  - [`SymVerdict::Refuted`] — carries a **concrete** witness that actually falsifies it.
-//!  - [`SymVerdict::Unknown`] — the interval abstraction wasn't precise enough to decide. Never a false
-//!    Proven or Refuted.
+//!  - [`SymVerdict::Proven`] — the property holds for **every** assignment in the domain (a real proof).
+//!  - [`SymVerdict::Refuted`] — carries a **concrete** assignment that falsifies it (confirmed).
+//!  - [`SymVerdict::Unknown`] — the interval abstraction wasn't precise enough to decide (e.g. a
+//!    relational/correlated property). Never a false Proven or Refuted.
 //!
 //! This is the role Kani/CBMC plays, done entirely first-party: no C, no external solver, no WSL —
-//! `no_std`, only `alloc` for the expression tree.
+//! `no_std`, only `alloc` for the expression tree and witnesses.
 
-// This module is a small expression DSL: several builder methods (add/sub/mul/shl/shr/rem/not)
-// intentionally mirror operator names for readability, so `should_implement_trait` is a non-issue here.
+// The DSL's builder methods (add/sub/mul/shl/shr/rem/not) intentionally mirror operator names.
 #![allow(clippy::should_implement_trait)]
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 /// An inclusive interval `[lo, hi]` over `u64`. Every operation **over-approximates**: the set of real
 /// results is always a subset of the returned interval — which is exactly what makes a proof over the
@@ -64,6 +68,7 @@ impl Iv {
     pub const fn contains(&self, v: u64) -> bool {
         self.lo <= v && v <= self.hi
     }
+
     fn add(self, o: Iv) -> Iv {
         match (self.lo.checked_add(o.lo), self.hi.checked_add(o.hi)) {
             (Some(lo), Some(hi)) => Iv { lo, hi },
@@ -71,14 +76,12 @@ impl Iv {
         }
     }
     fn sub(self, o: Iv) -> Iv {
-        // min = self.lo - o.hi, max = self.hi - o.lo; sound only if neither underflows.
         match (self.lo.checked_sub(o.hi), self.hi.checked_sub(o.lo)) {
             (Some(lo), Some(hi)) => Iv { lo, hi },
             _ => Iv::full(),
         }
     }
     fn mul(self, o: Iv) -> Iv {
-        // All values are non-negative, so mul is monotone in both args.
         match (self.lo.checked_mul(o.lo), self.hi.checked_mul(o.hi)) {
             (Some(lo), Some(hi)) => Iv { lo, hi },
             _ => Iv::full(),
@@ -92,7 +95,6 @@ impl Iv {
                 Iv::full()
             };
         }
-        // No value overflow iff hi <= (MAX >> k). shl is monotone.
         if self.hi <= (u64::MAX >> k) {
             Iv {
                 lo: self.lo << k,
@@ -112,33 +114,31 @@ impl Iv {
         } // monotone, never overflows
     }
     fn bitand(self, mask: u64) -> Iv {
-        // x & mask <= mask, and x & mask <= x <= self.hi, and >= 0.
         let hi = if mask < self.hi { mask } else { self.hi };
         Iv { lo: 0, hi }
     }
     fn bitor(self, mask: u64) -> Iv {
-        // x | mask >= mask and >= x >= self.lo. Upper bound is conservative.
         let lo = if mask > self.lo { mask } else { self.lo };
         Iv { lo, hi: u64::MAX }
     }
     fn rem(self, m: u64) -> Iv {
         if m == 0 {
-            return Iv::full(); // avoid a division trap; caller shouldn't do this
+            return Iv::full();
         }
         if self.hi < m {
-            self // x < m => x % m == x
+            self
         } else {
             Iv { lo: 0, hi: m - 1 }
         }
     }
 }
 
-/// An integer expression over a single symbolic variable `x`, evaluated in the `u64` bitvector domain
-/// (wrapping arithmetic, like real Rust `u64`).
+/// An integer expression over one or more symbolic variables (addressed by index), evaluated in the
+/// `u64` bitvector domain (wrapping arithmetic, like real Rust `u64`).
 #[derive(Clone, Debug)]
 pub enum Expr {
-    /// The symbolic input variable.
-    Var,
+    /// A symbolic input variable, by index (0, 1, ...).
+    Var(u32),
     /// A constant.
     Const(u64),
     Add(Box<Expr>, Box<Expr>),
@@ -157,9 +157,13 @@ pub enum Expr {
 }
 
 impl Expr {
-    // Ergonomic builders.
+    /// Variable 0 (the common single-variable case).
     pub fn var() -> Expr {
-        Expr::Var
+        Expr::Var(0)
+    }
+    /// Variable `i`.
+    pub fn var_at(i: u32) -> Expr {
+        Expr::Var(i)
     }
     pub fn c(v: u64) -> Expr {
         Expr::Const(v)
@@ -189,40 +193,41 @@ impl Expr {
         Expr::Rem(Box::new(self), m)
     }
 
-    /// Abstract evaluation: the interval of every value this expression can take when `x` ranges over
-    /// `x_iv`. Guaranteed to be a superset of the true value set (soundness).
-    fn eval_iv(&self, x_iv: Iv) -> Iv {
+    /// Abstract evaluation: the interval of every value this expression can take when each variable `i`
+    /// ranges over `doms[i]`. Guaranteed to be a superset of the true value set (soundness). An
+    /// out-of-range variable index defaults to the full domain (still sound).
+    fn eval_iv(&self, doms: &[Iv]) -> Iv {
         match self {
-            Expr::Var => x_iv,
+            Expr::Var(i) => doms.get(*i as usize).copied().unwrap_or_else(Iv::full),
             Expr::Const(v) => Iv::point(*v),
-            Expr::Add(a, b) => a.eval_iv(x_iv).add(b.eval_iv(x_iv)),
-            Expr::Sub(a, b) => a.eval_iv(x_iv).sub(b.eval_iv(x_iv)),
-            Expr::Mul(a, b) => a.eval_iv(x_iv).mul(b.eval_iv(x_iv)),
-            Expr::Shl(a, k) => a.eval_iv(x_iv).shl(*k),
-            Expr::Shr(a, k) => a.eval_iv(x_iv).shr(*k),
-            Expr::And(a, m) => a.eval_iv(x_iv).bitand(*m),
-            Expr::Or(a, m) => a.eval_iv(x_iv).bitor(*m),
-            Expr::Rem(a, m) => a.eval_iv(x_iv).rem(*m),
+            Expr::Add(a, b) => a.eval_iv(doms).add(b.eval_iv(doms)),
+            Expr::Sub(a, b) => a.eval_iv(doms).sub(b.eval_iv(doms)),
+            Expr::Mul(a, b) => a.eval_iv(doms).mul(b.eval_iv(doms)),
+            Expr::Shl(a, k) => a.eval_iv(doms).shl(*k),
+            Expr::Shr(a, k) => a.eval_iv(doms).shr(*k),
+            Expr::And(a, m) => a.eval_iv(doms).bitand(*m),
+            Expr::Or(a, m) => a.eval_iv(doms).bitor(*m),
+            Expr::Rem(a, m) => a.eval_iv(doms).rem(*m),
         }
     }
 
-    /// Concrete evaluation at a single `x` (wrapping `u64` arithmetic) — used to confirm witnesses.
-    fn eval_at(&self, x: u64) -> u64 {
+    /// Concrete evaluation at an assignment `xs` (wrapping `u64` arithmetic) — used to confirm witnesses.
+    fn eval_at(&self, xs: &[u64]) -> u64 {
         match self {
-            Expr::Var => x,
+            Expr::Var(i) => xs.get(*i as usize).copied().unwrap_or(0),
             Expr::Const(v) => *v,
-            Expr::Add(a, b) => a.eval_at(x).wrapping_add(b.eval_at(x)),
-            Expr::Sub(a, b) => a.eval_at(x).wrapping_sub(b.eval_at(x)),
-            Expr::Mul(a, b) => a.eval_at(x).wrapping_mul(b.eval_at(x)),
-            Expr::Shl(a, k) => a.eval_at(x).wrapping_shl(*k),
-            Expr::Shr(a, k) => a.eval_at(x).wrapping_shr(*k),
-            Expr::And(a, m) => a.eval_at(x) & *m,
-            Expr::Or(a, m) => a.eval_at(x) | *m,
+            Expr::Add(a, b) => a.eval_at(xs).wrapping_add(b.eval_at(xs)),
+            Expr::Sub(a, b) => a.eval_at(xs).wrapping_sub(b.eval_at(xs)),
+            Expr::Mul(a, b) => a.eval_at(xs).wrapping_mul(b.eval_at(xs)),
+            Expr::Shl(a, k) => a.eval_at(xs).wrapping_shl(*k),
+            Expr::Shr(a, k) => a.eval_at(xs).wrapping_shr(*k),
+            Expr::And(a, m) => a.eval_at(xs) & *m,
+            Expr::Or(a, m) => a.eval_at(xs) | *m,
             Expr::Rem(a, m) => {
                 if *m == 0 {
                     0
                 } else {
-                    a.eval_at(x) % *m
+                    a.eval_at(xs) % *m
                 }
             }
         }
@@ -238,7 +243,7 @@ enum Tri {
 }
 
 impl Tri {
-    fn not(self) -> Tri {
+    fn negate(self) -> Tri {
         match self {
             Tri::True => Tri::False,
             Tri::False => Tri::True,
@@ -261,8 +266,7 @@ impl Tri {
     }
 }
 
-/// A boolean property of the symbolic variable `x`, built from comparisons of [`Expr`]s and the usual
-/// connectives.
+/// A boolean property of the symbolic variables, built from comparisons of [`Expr`]s and connectives.
 #[derive(Clone, Debug)]
 pub enum Prop {
     Le(Expr, Expr),
@@ -292,33 +296,33 @@ impl Prop {
         Prop::Implies(Box::new(self), Box::new(o))
     }
 
-    fn eval_iv(&self, x_iv: Iv) -> Tri {
+    fn eval_iv(&self, doms: &[Iv]) -> Tri {
         match self {
-            Prop::Le(a, b) => cmp_le(a.eval_iv(x_iv), b.eval_iv(x_iv)),
-            Prop::Lt(a, b) => cmp_lt(a.eval_iv(x_iv), b.eval_iv(x_iv)),
-            Prop::Ge(a, b) => cmp_le(b.eval_iv(x_iv), a.eval_iv(x_iv)),
-            Prop::Gt(a, b) => cmp_lt(b.eval_iv(x_iv), a.eval_iv(x_iv)),
-            Prop::Eq(a, b) => cmp_eq(a.eval_iv(x_iv), b.eval_iv(x_iv)),
-            Prop::Ne(a, b) => cmp_eq(a.eval_iv(x_iv), b.eval_iv(x_iv)).not(),
-            Prop::And(p, q) => p.eval_iv(x_iv).and(q.eval_iv(x_iv)),
-            Prop::Or(p, q) => p.eval_iv(x_iv).or(q.eval_iv(x_iv)),
-            Prop::Not(p) => p.eval_iv(x_iv).not(),
-            Prop::Implies(p, q) => p.eval_iv(x_iv).not().or(q.eval_iv(x_iv)),
+            Prop::Le(a, b) => cmp_le(a.eval_iv(doms), b.eval_iv(doms)),
+            Prop::Lt(a, b) => cmp_lt(a.eval_iv(doms), b.eval_iv(doms)),
+            Prop::Ge(a, b) => cmp_le(b.eval_iv(doms), a.eval_iv(doms)),
+            Prop::Gt(a, b) => cmp_lt(b.eval_iv(doms), a.eval_iv(doms)),
+            Prop::Eq(a, b) => cmp_eq(a.eval_iv(doms), b.eval_iv(doms)),
+            Prop::Ne(a, b) => cmp_eq(a.eval_iv(doms), b.eval_iv(doms)).negate(),
+            Prop::And(p, q) => p.eval_iv(doms).and(q.eval_iv(doms)),
+            Prop::Or(p, q) => p.eval_iv(doms).or(q.eval_iv(doms)),
+            Prop::Not(p) => p.eval_iv(doms).negate(),
+            Prop::Implies(p, q) => p.eval_iv(doms).negate().or(q.eval_iv(doms)),
         }
     }
 
-    fn eval_at(&self, x: u64) -> bool {
+    fn eval_at(&self, xs: &[u64]) -> bool {
         match self {
-            Prop::Le(a, b) => a.eval_at(x) <= b.eval_at(x),
-            Prop::Lt(a, b) => a.eval_at(x) < b.eval_at(x),
-            Prop::Ge(a, b) => a.eval_at(x) >= b.eval_at(x),
-            Prop::Gt(a, b) => a.eval_at(x) > b.eval_at(x),
-            Prop::Eq(a, b) => a.eval_at(x) == b.eval_at(x),
-            Prop::Ne(a, b) => a.eval_at(x) != b.eval_at(x),
-            Prop::And(p, q) => p.eval_at(x) && q.eval_at(x),
-            Prop::Or(p, q) => p.eval_at(x) || q.eval_at(x),
-            Prop::Not(p) => !p.eval_at(x),
-            Prop::Implies(p, q) => !p.eval_at(x) || q.eval_at(x),
+            Prop::Le(a, b) => a.eval_at(xs) <= b.eval_at(xs),
+            Prop::Lt(a, b) => a.eval_at(xs) < b.eval_at(xs),
+            Prop::Ge(a, b) => a.eval_at(xs) >= b.eval_at(xs),
+            Prop::Gt(a, b) => a.eval_at(xs) > b.eval_at(xs),
+            Prop::Eq(a, b) => a.eval_at(xs) == b.eval_at(xs),
+            Prop::Ne(a, b) => a.eval_at(xs) != b.eval_at(xs),
+            Prop::And(p, q) => p.eval_at(xs) && q.eval_at(xs),
+            Prop::Or(p, q) => p.eval_at(xs) || q.eval_at(xs),
+            Prop::Not(p) => !p.eval_at(xs),
+            Prop::Implies(p, q) => !p.eval_at(xs) || q.eval_at(xs),
         }
     }
 }
@@ -345,65 +349,95 @@ fn cmp_eq(a: Iv, b: Iv) -> Tri {
     if a.lo == a.hi && b.lo == b.hi && a.lo == b.lo {
         Tri::True
     } else if a.hi < b.lo || b.hi < a.lo {
-        Tri::False // disjoint intervals can never be equal
+        Tri::False
     } else {
         Tri::Unknown
     }
 }
 
 /// The outcome of a tier-5 symbolic proof.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SymVerdict {
-    /// The property holds for every value in the domain — a proof, no enumeration.
+    /// The property holds for every assignment in the domain — a proof, no enumeration.
     Proven,
-    /// The property fails; `witness` is a concrete value that falsifies it (confirmed by evaluation).
-    Refuted { witness: u64 },
+    /// The property fails; `witness[i]` is a concrete value for variable `i` that falsifies it
+    /// (confirmed by concrete evaluation).
+    Refuted { witness: Vec<u64> },
     /// The interval abstraction was too imprecise to decide. Never a false Proven/Refuted.
     Unknown,
 }
 
-/// Prove `prop` holds for **every** `x` in `domain` — symbolically, without enumerating the domain.
+/// Prove `prop` holds for every value of a **single** variable `x` in `domain` (convenience for the
+/// common one-variable case). See [`prove_forall_n`] for multiple variables.
+pub fn prove_forall(domain: Iv, prop: &Prop) -> SymVerdict {
+    prove_forall_n(&[domain], prop)
+}
+
+/// Prove `prop` holds for **every** assignment where variable `i` ranges over `doms[i]` — symbolically,
+/// without enumerating the domain.
 ///
 /// Sound: a `Proven` result means the interval analysis established the property over a *superset* of
 /// the domain, so it holds for the domain itself. A `Refuted` result is always backed by a concrete
-/// witness confirmed with wrapping arithmetic. Otherwise `Unknown`.
-pub fn prove_forall(domain: Iv, prop: &Prop) -> SymVerdict {
-    match prop.eval_iv(domain) {
+/// assignment confirmed with wrapping arithmetic. Otherwise `Unknown`.
+pub fn prove_forall_n(doms: &[Iv], prop: &Prop) -> SymVerdict {
+    match prop.eval_iv(doms) {
         Tri::True => SymVerdict::Proven,
         Tri::False => {
-            // The property is false across the whole (over-approximated) domain; the low endpoint is a
-            // real value in the domain — confirm it concretely so the witness is never spurious.
-            if !prop.eval_at(domain.lo) {
-                SymVerdict::Refuted { witness: domain.lo }
+            // False across the whole (over-approximated) domain; the all-low corner is a real assignment
+            // — confirm it concretely so the witness is never spurious.
+            let xs: Vec<u64> = doms.iter().map(|d| d.lo).collect();
+            if !prop.eval_at(&xs) {
+                SymVerdict::Refuted { witness: xs }
             } else {
-                probe_witnesses(domain, prop)
+                probe(doms, prop)
             }
         }
-        Tri::Unknown => probe_witnesses(domain, prop),
+        Tri::Unknown => probe(doms, prop),
     }
 }
 
-/// When the abstraction can't decide, try the values most likely to break a property — the domain
-/// endpoints and bit boundaries — concretely. A hit is a genuine counterexample; otherwise Unknown.
-fn probe_witnesses(domain: Iv, prop: &Prop) -> SymVerdict {
-    let mut candidates = [
-        domain.lo,
-        domain.hi,
-        domain.lo.wrapping_add(1),
-        domain.hi.wrapping_sub(1),
-        domain
-            .lo
-            .wrapping_add((domain.hi.wrapping_sub(domain.lo)) / 2),
-        0,
-        u64::MAX,
-        1,
-        u64::MAX >> 1,
-        1u64 << 63,
-    ];
-    // De-dup is unnecessary; a redundant check is harmless.
-    for w in candidates.iter_mut() {
-        if domain.contains(*w) && !prop.eval_at(*w) {
-            return SymVerdict::Refuted { witness: *w };
+/// Prove a **function contract**: that `postcond` holds for every assignment in `doms` for which
+/// `precond` holds. This is `forall x. precond(x) -> postcond(x)` — the core of verifying a function or
+/// component's behaviour (validate inputs in the precondition, guarantee the postcondition).
+pub fn prove_contract(doms: &[Iv], precond: &Prop, postcond: &Prop) -> SymVerdict {
+    let implication = precond.clone().implies(postcond.clone());
+    prove_forall_n(doms, &implication)
+}
+
+/// When the abstraction can't decide, try the assignments most likely to break a property — the corners
+/// of the domain box and per-variable special values — concretely. A hit is a genuine counterexample.
+fn probe(doms: &[Iv], prop: &Prop) -> SymVerdict {
+    let n = doms.len();
+    // Corners of the domain box: each variable at its lo or hi. Bounded to 2^12 to stay fast.
+    if n <= 12 {
+        for mask in 0u32..(1u32 << n) {
+            let xs: Vec<u64> = (0..n)
+                .map(|i| {
+                    if mask & (1 << i) != 0 {
+                        doms[i].hi
+                    } else {
+                        doms[i].lo
+                    }
+                })
+                .collect();
+            if !prop.eval_at(&xs) {
+                return SymVerdict::Refuted { witness: xs };
+            }
+        }
+    }
+    // Per-variable special values (the rest held at their low bound) — catches interior breakers.
+    for i in 0..n {
+        let d = doms[i];
+        let mid = d.lo.wrapping_add(d.hi.wrapping_sub(d.lo) / 2);
+        for &sv in &[d.lo, d.hi, mid, 0, u64::MAX, 1u64 << 63, 1] {
+            if !d.contains(sv) {
+                continue;
+            }
+            let mut xs: Vec<u64> = doms.iter().map(|dd| dd.lo).collect();
+            xs[i] = sv;
+            if !prop.eval_at(&xs) {
+                return SymVerdict::Refuted { witness: xs };
+            }
         }
     }
     SymVerdict::Unknown
