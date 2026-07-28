@@ -26,6 +26,10 @@ extern crate alloc;
 /// properties over *all* of `u64` without enumerating it, entirely in first-party Rust. See [`symbolic`].
 pub mod symbolic;
 
+/// A tamper-evident, append-only hash-chain [`ledger`] (with a pure-Rust SHA-256) for recording proof
+/// results so they cannot be forged or silently deleted.
+pub mod ledger;
+
 /// The outcome of a proof attempt over a domain.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict<T> {

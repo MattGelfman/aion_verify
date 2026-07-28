@@ -109,6 +109,30 @@ let p = Prop::Le(Expr::var().shr(1), Expr::var());          // correlated, true 
 assert_eq!(prove_forall_refine(&[Iv::full()], &p, 256), SymVerdict::Proven);
 ```
 
+## Tamper-evident proof ledger (`ledger` module)
+
+A proof is only trustworthy if its result can't be quietly forged or deleted. `ledger` records each
+verdict in a **hash chain** (with a self-contained pure-Rust **SHA-256**): every entry carries the hash
+of the one before it, so altering *any* past record — or deleting one — changes every hash after it and
+is caught by `verify()`.
+
+```rust
+use aion_verify::ledger::Ledger;
+
+let mut log = Ledger::new();
+log.record("x + 1 > x over u8", true);   // a proven result
+log.record("x <= 100 over u64", false);  // a refuted result, recorded just the same
+let anchor = log.head();                 // 32-byte fingerprint of the whole history
+
+assert_eq!(log.verify(), Ok(()));        // an untampered chain verifies
+// Persist the entries, reload with Ledger::from_entries(..), and verify() again to detect any
+// on-disk tampering. Publish `anchor` somewhere out of the writer's control and a later divergence
+// is proof the log was cut or rewritten.
+```
+
+It's a blockchain's core guarantee (an immutable, verifiable history) without the distributed-consensus
+machinery a single authority doesn't need.
+
 ## When to reach for something else
 
 Refinement is bounded by its split budget, and neither it nor the interval domain handles arbitrary
