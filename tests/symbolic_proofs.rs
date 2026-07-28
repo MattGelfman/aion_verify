@@ -1,0 +1,88 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+//! TIER 5 tests — symbolic proofs over the *entire* `u64` domain (2^64 values) with no enumeration,
+//! plus concrete-witness refutation and honest `Unknown` where the interval domain is too weak. The
+//! last one is the important one: it demonstrates the engine never returns a false Proven/Refuted.
+
+use aion_verify::symbolic::{prove_forall, Expr, Iv, Prop, SymVerdict};
+
+#[test]
+fn proves_mask_bound_over_all_of_u64() {
+    // ∀ x: (x & 0xFF) <= 255 — proven over all 2^64 values, symbolically.
+    let p = Prop::Le(Expr::var().and(0xFF), Expr::c(255));
+    assert_eq!(prove_forall(Iv::full(), &p), SymVerdict::Proven);
+}
+
+#[test]
+fn proves_shift_range_over_all_of_u64() {
+    // ∀ x: (x >> 8) < 2^56
+    let p = Prop::Lt(Expr::var().shr(8), Expr::c(1 << 56));
+    assert_eq!(prove_forall(Iv::full(), &p), SymVerdict::Proven);
+}
+
+#[test]
+fn proves_modulo_bound_over_all_of_u64() {
+    // ∀ x: x % 10 <= 9
+    let p = Prop::Le(Expr::var().rem(10), Expr::c(9));
+    assert_eq!(prove_forall(Iv::full(), &p), SymVerdict::Proven);
+}
+
+#[test]
+fn proves_bounded_arithmetic_has_no_overflow() {
+    // ∀ x ∈ [0, 1000]: x + 5 <= 1005 (the analysis knows the add can't overflow in range).
+    let p = Prop::Le(Expr::var().add(Expr::c(5)), Expr::c(1005));
+    assert_eq!(prove_forall(Iv::new(0, 1000), &p), SymVerdict::Proven);
+    // ...and x * 2 <= 2000 on the same domain.
+    let q = Prop::Le(Expr::var().mul(Expr::c(2)), Expr::c(2000));
+    assert_eq!(prove_forall(Iv::new(0, 1000), &q), SymVerdict::Proven);
+}
+
+#[test]
+fn proves_a_conjunction() {
+    // ∀ x: (x & 0xF) <= 15  AND  (x >> 60) <= 15
+    let p =
+        Prop::Le(Expr::var().and(0xF), Expr::c(15)).and(Prop::Le(Expr::var().shr(60), Expr::c(15)));
+    assert_eq!(prove_forall(Iv::full(), &p), SymVerdict::Proven);
+}
+
+#[test]
+fn refutes_with_a_confirmed_witness() {
+    // ∀ x: x <= 100 — false. Must return a concrete value that really violates it.
+    let p = Prop::Le(Expr::var(), Expr::c(100));
+    match prove_forall(Iv::full(), &p) {
+        SymVerdict::Refuted { witness } => {
+            assert!(witness > 100, "witness {witness} must break x<=100")
+        }
+        v => panic!("expected Refuted, got {v:?}"),
+    }
+}
+
+#[test]
+fn refutes_a_too_tight_mask_bound() {
+    // ∀ x: (x & 0xFF) <= 100 — false, since low byte can reach 255.
+    let p = Prop::Le(Expr::var().and(0xFF), Expr::c(100));
+    match prove_forall(Iv::full(), &p) {
+        SymVerdict::Refuted { witness } => assert!((witness & 0xFF) > 100),
+        v => panic!("expected Refuted, got {v:?}"),
+    }
+}
+
+#[test]
+fn honest_unknown_never_a_false_result() {
+    // (x >> 1) <= x is TRUE for every u64 — but a NON-relational interval domain loses the correlation
+    // between `x >> 1` and `x`, and no probed value breaks it. So the engine says Unknown, NOT a false
+    // Proven and NOT a false Refuted. Soundness over bravado.
+    let p = Prop::Le(Expr::var().shr(1), Expr::var());
+    assert_eq!(prove_forall(Iv::full(), &p), SymVerdict::Unknown);
+}
+
+#[test]
+fn u64_max_boundary_is_safe() {
+    // Reasoning at the very top of the domain must never overflow or panic.
+    let p = Prop::Ge(Expr::var(), Expr::c(0)); // trivially true for unsigned
+    assert_eq!(prove_forall(Iv::full(), &p), SymVerdict::Proven);
+    let q = Prop::Le(Expr::var(), Expr::c(u64::MAX)); // every u64 <= u64::MAX
+    assert_eq!(prove_forall(Iv::full(), &q), SymVerdict::Proven);
+}

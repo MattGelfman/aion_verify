@@ -20,6 +20,12 @@
 #![forbid(unsafe_code)]
 #![no_std]
 
+extern crate alloc;
+
+/// TIER 5 — symbolic verification over unbounded domains (interval abstract interpretation). Proves
+/// properties over *all* of `u64` without enumerating it, entirely in first-party Rust. See [`symbolic`].
+pub mod symbolic;
+
 /// The outcome of a proof attempt over a domain.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict<T> {

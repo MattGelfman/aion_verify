@@ -60,11 +60,35 @@ assert!(v.is_proven());
 
 Each returns a `Verdict<T>`: `is_proven()`, `cases()`, and `counterexample() -> Option<&T>`.
 
+## Tier 5 — symbolic proofs over *unbounded* domains (`symbolic` module)
+
+Tier 4 enumerates, so it needs a finite domain. Tier 5 proves properties over the **entire** domain —
+including all 2^64 values of `u64` — **without enumerating it**, by interval abstract interpretation.
+Because it must *reason about* an expression (not just call it), tier-5 predicates use a small
+first-party `Expr`/`Prop` DSL:
+
+```rust
+use aion_verify::symbolic::{prove_forall, Expr, Iv, Prop, SymVerdict};
+
+// Prove `(x & 0xFF) <= 255` for EVERY u64 — symbolically, no enumeration:
+let p = Prop::Le(Expr::var().and(0xFF), Expr::c(255));
+assert_eq!(prove_forall(Iv::full(), &p), SymVerdict::Proven);
+
+// A false property comes back with a concrete witness:
+let q = Prop::Le(Expr::var(), Expr::c(100));
+matches!(prove_forall(Iv::full(), &q), SymVerdict::Refuted { .. });
+```
+
+`SymVerdict` is `Proven` (holds for all), `Refuted { witness }` (a real counterexample), or `Unknown`
+(the interval abstraction was too weak) — **never a false Proven or Refuted**. Pure Rust, no external
+solver.
+
 ## When to reach for something else
 
-`aion_verify` **enumerates**, so it's for domains you can actually iterate. For unbounded or
-astronomically large spaces, use a symbolic tool like [Kani](https://github.com/model-checking/kani)
-(the two pair well: prove the small/bounded cases exhaustively here, the large cases symbolically there).
+The interval domain is non-relational and single-variable, so tier 5 returns `Unknown` on correlated
+or higher-arity properties it can't yet decide (that's soundness, not a bug). For those, a mature
+symbolic tool such as [Kani](https://github.com/model-checking/kani) remains a good complement while
+this engine's decision procedures grow.
 
 ## License
 

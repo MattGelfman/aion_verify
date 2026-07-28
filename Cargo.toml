@@ -1,10 +1,10 @@
 [package]
 name = "aion_verify"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.70"
 license = "MPL-2.0"
-description = "An exhaustive bounded proof engine: check a predicate against EVERY input in a finite/bounded domain and get back Proven { cases } or Refuted with the counterexample — complete coverage, not sampling. no_std, zero dependencies, no unsafe. Complements (does not replace) symbolic model checkers like Kani."
+description = "A two-tier proof engine: tier 4 checks a predicate against EVERY input in a bounded domain (exhaustive, not sampling); tier 5 proves properties over UNBOUNDED domains (all of u64) symbolically via interval abstract interpretation — Proven / Refuted-with-witness / honest Unknown, never a false result. Pure Rust, no_std, no unsafe, no external solver. A first-party alternative to symbolic model checkers like Kani."
 repository = "https://github.com/MattGelfman/aion_verify"
 documentation = "https://docs.rs/aion_verify"
 readme = "README.md"
