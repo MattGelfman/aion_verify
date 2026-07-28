@@ -442,3 +442,67 @@ fn probe(doms: &[Iv], prop: &Prop) -> SymVerdict {
     }
     SymVerdict::Unknown
 }
+
+/// Prove `prop` over `doms` with **interval refinement** (branch-and-bound). When the plain interval
+/// analysis can't decide a domain, this bisects the widest variable and proves each half — the property
+/// holds on the whole box iff it holds on both halves, so splitting is sound and recovers the
+/// correlation a non-relational interval domain loses. This proves many properties [`prove_forall_n`]
+/// returns `Unknown` for (e.g. `(x >> 1) <= x`).
+///
+/// `max_splits` bounds the total number of bisections (protecting against blow-up); on exhaustion the
+/// undecided part is reported honestly as `Unknown`. A `Refuted` anywhere is a real counterexample for
+/// the whole domain; `Proven` requires every sub-box to be proven.
+pub fn prove_forall_refine(doms: &[Iv], prop: &Prop, max_splits: u32) -> SymVerdict {
+    let mut budget = max_splits;
+    refine(doms, prop, &mut budget)
+}
+
+fn refine(doms: &[Iv], prop: &Prop, budget: &mut u32) -> SymVerdict {
+    match prop.eval_iv(doms) {
+        Tri::True => SymVerdict::Proven,
+        Tri::False => {
+            let xs: Vec<u64> = doms.iter().map(|d| d.lo).collect();
+            if !prop.eval_at(&xs) {
+                SymVerdict::Refuted { witness: xs }
+            } else {
+                probe(doms, prop)
+            }
+        }
+        Tri::Unknown => {
+            // Pick the widest splittable variable; if none (all points) the intervals are exact and
+            // eval_iv would not have returned Unknown, so fall back to a probe.
+            let mut wi: Option<usize> = None;
+            let mut wwidth = 0u64;
+            for (i, d) in doms.iter().enumerate() {
+                let w = d.hi - d.lo;
+                if w > 0 && w >= wwidth {
+                    wwidth = w;
+                    wi = Some(i);
+                }
+            }
+            let i = match wi {
+                Some(i) => i,
+                None => return probe(doms, prop),
+            };
+            if *budget == 0 {
+                return probe(doms, prop); // out of budget: try to refute, else honest Unknown
+            }
+            *budget -= 1;
+            let d = doms[i];
+            let mid = d.lo + (d.hi - d.lo) / 2;
+            let mut left = doms.to_vec();
+            left[i] = Iv::new(d.lo, mid);
+            let mut right = doms.to_vec();
+            right[i] = Iv::new(mid + 1, d.hi);
+            match refine(&left, prop, budget) {
+                SymVerdict::Refuted { witness } => SymVerdict::Refuted { witness },
+                SymVerdict::Unknown => match refine(&right, prop, budget) {
+                    // left undecided: a refutation on the right is still real; otherwise Unknown.
+                    SymVerdict::Refuted { witness } => SymVerdict::Refuted { witness },
+                    _ => SymVerdict::Unknown,
+                },
+                SymVerdict::Proven => refine(&right, prop, budget), // whole = left ∧ right
+            }
+        }
+    }
+}

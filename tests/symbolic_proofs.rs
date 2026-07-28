@@ -7,7 +7,7 @@
 //! last one is the important one: it demonstrates the engine never returns a false Proven/Refuted.
 
 use aion_verify::symbolic::{
-    prove_contract, prove_forall, prove_forall_n, Expr, Iv, Prop, SymVerdict,
+    prove_contract, prove_forall, prove_forall_n, prove_forall_refine, Expr, Iv, Prop, SymVerdict,
 };
 
 #[test]
@@ -131,6 +131,43 @@ fn honest_unknown_never_a_false_result() {
     // Proven and NOT a false Refuted. Soundness over bravado.
     let p = Prop::Le(Expr::var().shr(1), Expr::var());
     assert_eq!(prove_forall(Iv::full(), &p), SymVerdict::Unknown);
+}
+
+// ── Phase C — interval refinement (branch-and-bound) proves correlated properties ──────────────────
+
+#[test]
+fn refinement_proves_a_correlated_property() {
+    // (x >> 1) <= x is TRUE for all u64 but CORRELATED — prove_forall_n gives Unknown (see the test
+    // above). With refinement (bisecting the domain) it becomes a real proof over all 2^64 values.
+    let p = Prop::Le(Expr::var().shr(1), Expr::var());
+    assert_eq!(prove_forall_n(&[Iv::full()], &p), SymVerdict::Unknown); // plain interval: undecided
+    assert_eq!(
+        prove_forall_refine(&[Iv::full()], &p, 256),
+        SymVerdict::Proven
+    ); // refinement: proven
+}
+
+#[test]
+fn refinement_refutes_a_false_correlation() {
+    // (x >> 1) >= x is FALSE (x=1 gives 0 >= 1). Refinement must find a concrete witness.
+    let p = Prop::Ge(Expr::var().shr(1), Expr::var());
+    match prove_forall_refine(&[Iv::full()], &p, 256) {
+        SymVerdict::Refuted { witness } => {
+            assert!((witness[0] >> 1) < witness[0], "witness {:?}", witness)
+        }
+        v => panic!("expected Refuted, got {v:?}"),
+    }
+}
+
+#[test]
+fn refinement_is_honest_when_the_budget_runs_out() {
+    // With too small a split budget it cannot finish the proof — and must say Unknown, never a false
+    // Proven. Soundness holds regardless of budget.
+    let p = Prop::Le(Expr::var().shr(1), Expr::var());
+    assert_eq!(
+        prove_forall_refine(&[Iv::full()], &p, 2),
+        SymVerdict::Unknown
+    );
 }
 
 #[test]

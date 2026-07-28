@@ -97,12 +97,24 @@ variable), or `Unknown`
 (the interval abstraction was too weak) — **never a false Proven or Refuted**. Pure Rust, no external
 solver.
 
+**Correlated properties via refinement.** A plain interval domain is non-relational, so it returns
+`Unknown` on properties that couple a variable to itself (e.g. `(x >> 1) <= x`). `prove_forall_refine`
+recovers these with **branch-and-bound**: when a box is undecided it bisects the widest variable and
+proves each half (the property holds on the whole iff it holds on both), up to a split budget — still
+sound, and `Unknown` if the budget runs out.
+
+```rust
+use aion_verify::symbolic::{prove_forall_refine, Expr, Iv, Prop, SymVerdict};
+let p = Prop::Le(Expr::var().shr(1), Expr::var());          // correlated, true for all u64
+assert_eq!(prove_forall_refine(&[Iv::full()], &p, 256), SymVerdict::Proven);
+```
+
 ## When to reach for something else
 
-The interval domain is non-relational and single-variable, so tier 5 returns `Unknown` on correlated
-or higher-arity properties it can't yet decide (that's soundness, not a bug). For those, a mature
-symbolic tool such as [Kani](https://github.com/model-checking/kani) remains a good complement while
-this engine's decision procedures grow.
+Refinement is bounded by its split budget, and neither it nor the interval domain handles arbitrary
+non-linear or unbounded-arity logic. For those, a mature symbolic tool such as
+[Kani](https://github.com/model-checking/kani) remains a good complement while this engine's decision
+procedures grow.
 
 ## License
 
