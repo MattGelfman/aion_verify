@@ -34,6 +34,10 @@ pub mod ledger;
 /// is provably yours and immune to Shor's algorithm — using only SHA-512, still zero-dependency.
 pub mod pqsig;
 
+/// Many-time post-quantum signatures: a Merkle tree ([`mss`], XMSS-style) over the one-time WOTS, so
+/// one published root signs `2^height` proofs from a single key.
+pub mod mss;
+
 /// The outcome of a proof attempt over a domain.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict<T> {

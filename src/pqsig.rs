@@ -84,10 +84,12 @@ pub fn sign(seed: &[u8; N], msg: &[u8; N]) -> Signature {
     Signature(sig)
 }
 
-/// Verify `sig` on `msg` against the published `public_key`. Returns true iff the signature is authentic.
-pub fn verify(public_key: &[u8; N], msg: &[u8; N], sig: &Signature) -> bool {
+/// Recover the public key that a signature on `msg` implies, by finishing each chain. `None` if the
+/// signature is the wrong length. This is what a Merkle scheme (XMSS/MSS) needs to fold a per-leaf WOTS
+/// signature into a tree — recover the leaf public key, then walk the authentication path.
+pub fn pk_from_sig(msg: &[u8; N], sig: &Signature) -> Option<[u8; N]> {
     if sig.0.len() != LEN {
-        return false;
+        return None;
     }
     let d = digits(msg);
     let mut concat = Vec::with_capacity(LEN * N);
@@ -95,5 +97,10 @@ pub fn verify(public_key: &[u8; N], msg: &[u8; N], sig: &Signature) -> bool {
         // Finish each chain from where the signature stopped; it must land on the public key element.
         concat.extend_from_slice(&chain(sig.0[i], (W - 1) - di));
     }
-    sha512(&concat) == *public_key
+    Some(sha512(&concat))
+}
+
+/// Verify `sig` on `msg` against the published `public_key`. Returns true iff the signature is authentic.
+pub fn verify(public_key: &[u8; N], msg: &[u8; N], sig: &Signature) -> bool {
+    pk_from_sig(msg, sig).is_some_and(|pk| pk == *public_key)
 }
