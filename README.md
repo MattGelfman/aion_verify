@@ -68,7 +68,11 @@ astronomically large spaces, use a symbolic tool like [Kani](https://github.com/
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT)
-at your option. Unless you explicitly state otherwise, any contribution intentionally submitted for
-inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above,
-without any additional terms or conditions.
+Licensed under the **[Mozilla Public License 2.0](LICENSE)** (MPL-2.0) — a file-level copyleft.
+
+In plain terms: you can use `aion_verify` in any project, including proprietary ones, **but any
+modifications you make to its source files must themselves be released under the MPL-2.0** (i.e. kept
+open source). Improvements to the engine stay free for everyone; the wider project you build around it
+does not have to be. Contributions submitted for inclusion are licensed under the same terms.
+
+> Note: `0.1.0` was briefly published under MIT/Apache-2.0 and has been yanked; `0.2.0` onward is MPL-2.0.
