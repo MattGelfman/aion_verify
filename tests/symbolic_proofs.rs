@@ -7,7 +7,8 @@
 //! last one is the important one: it demonstrates the engine never returns a false Proven/Refuted.
 
 use aion_verify::symbolic::{
-    prove_contract, prove_forall, prove_forall_n, prove_forall_refine, Expr, Iv, Prop, SymVerdict,
+    prove_contract, prove_forall, prove_forall_n, prove_forall_refine, prove_inductive, Expr, Iv,
+    Prop, SymVerdict,
 };
 
 #[test]
@@ -202,6 +203,47 @@ fn relational_is_sound_under_wrapping() {
         SymVerdict::Proven,
         "must never falsely prove a wrapping case"
     );
+}
+
+// ── Phase F — inductive invariants (reasoning about loops / state, not just values) ────────────────
+
+#[test]
+fn proves_an_inductive_invariant_of_a_loop() {
+    // A counter that starts at 5 and only increments: prove `i >= 5` holds for EVERY iteration, by
+    // induction (initiation + consecution) — no unrolling. Handles STATE, which value-only tiers can't.
+    let init = &[Iv::new(5, 5)]; // i starts at 5
+    let guard = Prop::Le(Expr::var(), Expr::c(1_000_000_000)); // loop while i <= 1e9
+    let transition = &[Expr::var().add(Expr::c(1))]; // i' = i + 1
+    let invariant = Prop::Ge(Expr::var(), Expr::c(5)); // i >= 5
+    let state = &[Iv::new(5, 1_000_000_000)]; // reachable states have i >= 5
+    assert_eq!(
+        prove_inductive(init, &guard, transition, &invariant, state, 64),
+        SymVerdict::Proven
+    );
+}
+
+#[test]
+fn catches_a_non_inductive_invariant() {
+    // `i <= 5` is NOT preserved by an unconditional increment (at i=5, the step makes i=6). Initiation
+    // passes but consecution fails — the prover must catch it with the breaking state, not falsely prove.
+    let init = &[Iv::new(0, 0)];
+    let guard = Prop::Le(Expr::var(), Expr::c(1000)); // trivially true on the domain
+    let transition = &[Expr::var().add(Expr::c(1))];
+    let invariant = Prop::Le(Expr::var(), Expr::c(5));
+    let state = &[Iv::new(0, 5)];
+    let v = prove_inductive(init, &guard, transition, &invariant, state, 64);
+    assert_ne!(
+        v,
+        SymVerdict::Proven,
+        "a non-inductive invariant must not be proven"
+    );
+    if let SymVerdict::Refuted { witness } = v {
+        assert_eq!(
+            witness,
+            vec![5],
+            "the breaking state is i = 5 (step -> 6 > 5)"
+        );
+    }
 }
 
 #[test]

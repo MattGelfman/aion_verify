@@ -193,6 +193,23 @@ impl Expr {
         Expr::Rem(Box::new(self), m)
     }
 
+    /// Substitute every variable by its next-state expression: `Var(i)` becomes `next[i]`. This is how a
+    /// transition system's step is applied to an invariant (turn `inv(state)` into `inv(next_state)`).
+    pub fn subst(&self, next: &[Expr]) -> Expr {
+        match self {
+            Expr::Var(i) => next.get(*i as usize).cloned().unwrap_or(Expr::Var(*i)),
+            Expr::Const(v) => Expr::Const(*v),
+            Expr::Add(a, b) => Expr::Add(Box::new(a.subst(next)), Box::new(b.subst(next))),
+            Expr::Sub(a, b) => Expr::Sub(Box::new(a.subst(next)), Box::new(b.subst(next))),
+            Expr::Mul(a, b) => Expr::Mul(Box::new(a.subst(next)), Box::new(b.subst(next))),
+            Expr::Shl(a, k) => Expr::Shl(Box::new(a.subst(next)), *k),
+            Expr::Shr(a, k) => Expr::Shr(Box::new(a.subst(next)), *k),
+            Expr::And(a, m) => Expr::And(Box::new(a.subst(next)), *m),
+            Expr::Or(a, m) => Expr::Or(Box::new(a.subst(next)), *m),
+            Expr::Rem(a, m) => Expr::Rem(Box::new(a.subst(next)), *m),
+        }
+    }
+
     /// Abstract evaluation: the interval of every value this expression can take when each variable `i`
     /// ranges over `doms[i]`. Guaranteed to be a superset of the true value set (soundness). An
     /// out-of-range variable index defaults to the full domain (still sound).
@@ -294,6 +311,23 @@ impl Prop {
     }
     pub fn implies(self, o: Prop) -> Prop {
         Prop::Implies(Box::new(self), Box::new(o))
+    }
+
+    /// Substitute every variable in this proposition by its next-state expression (`Var(i)` -> `next[i]`).
+    /// Turns `inv(state)` into `inv(next_state)` — the heart of an inductive consecution check.
+    pub fn subst(&self, next: &[Expr]) -> Prop {
+        match self {
+            Prop::Le(a, b) => Prop::Le(a.subst(next), b.subst(next)),
+            Prop::Lt(a, b) => Prop::Lt(a.subst(next), b.subst(next)),
+            Prop::Ge(a, b) => Prop::Ge(a.subst(next), b.subst(next)),
+            Prop::Gt(a, b) => Prop::Gt(a.subst(next), b.subst(next)),
+            Prop::Eq(a, b) => Prop::Eq(a.subst(next), b.subst(next)),
+            Prop::Ne(a, b) => Prop::Ne(a.subst(next), b.subst(next)),
+            Prop::And(p, q) => Prop::And(Box::new(p.subst(next)), Box::new(q.subst(next))),
+            Prop::Or(p, q) => Prop::Or(Box::new(p.subst(next)), Box::new(q.subst(next))),
+            Prop::Not(p) => Prop::Not(Box::new(p.subst(next))),
+            Prop::Implies(p, q) => Prop::Implies(Box::new(p.subst(next)), Box::new(q.subst(next))),
+        }
     }
 
     fn eval_iv(&self, doms: &[Iv]) -> Tri {
@@ -540,6 +574,43 @@ pub fn prove_forall_n(doms: &[Iv], prop: &Prop) -> SymVerdict {
 pub fn prove_contract(doms: &[Iv], precond: &Prop, postcond: &Prop) -> SymVerdict {
     let implication = precond.clone().implies(postcond.clone());
     prove_forall_n(doms, &implication)
+}
+
+/// Prove an **inductive invariant** of a transition system — the first-party way to reason about a
+/// *loop or state machine* without unrolling it. Given:
+///  - `init_doms`: the set of initial states,
+///  - `guard`: the condition under which a step is taken (the loop condition),
+///  - `transition[i]`: the next value of variable `i` after one step,
+///  - `invariant`: the property to establish for **every reachable state**,
+///  - `state_doms`: a domain covering the reachable states (over which preservation is checked),
+///
+/// it checks the two classic conditions and, if both hold, the invariant holds for *all* iterations:
+///  1. **Initiation** — the invariant holds in every initial state.
+///  2. **Consecution** — if the invariant and the guard hold, they still hold after one step
+///     (`(invariant ∧ guard) → invariant[next]`).
+///
+/// Returns [`SymVerdict::Proven`] only when both hold; otherwise the failing check's verdict (a
+/// `Refuted` names a concrete state that breaks it). `max_splits` bounds the refinement used on each
+/// verification condition. This handles **state**, which the value-only tiers do not.
+pub fn prove_inductive(
+    init_doms: &[Iv],
+    guard: &Prop,
+    transition: &[Expr],
+    invariant: &Prop,
+    state_doms: &[Iv],
+    max_splits: u32,
+) -> SymVerdict {
+    // 1. Initiation: the invariant holds in every initial state.
+    let initiation = prove_forall_refine(init_doms, invariant, max_splits);
+    if initiation != SymVerdict::Proven {
+        return initiation;
+    }
+    // 2. Consecution: (invariant ∧ guard) ⇒ invariant after one step.
+    let vc = invariant
+        .clone()
+        .and(guard.clone())
+        .implies(invariant.subst(transition));
+    prove_forall_refine(state_doms, &vc, max_splits)
 }
 
 /// When the abstraction can't decide, try the assignments most likely to break a property — the corners
