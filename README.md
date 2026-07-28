@@ -109,6 +109,23 @@ let p = Prop::Le(Expr::var().shr(1), Expr::var());          // correlated, true 
 assert_eq!(prove_forall_refine(&[Iv::full()], &p, 256), SymVerdict::Proven);
 ```
 
+**Loops & state via inductive invariants.** Everything above reasons about *values*. `prove_inductive`
+reasons about a *loop*: it proves a property holds on **every** iteration by induction — **initiation**
+(it holds in the initial states) plus **consecution** (if it holds and the guard is true, it still holds
+after one transition) — with no unrolling. Consecution uses **assume-narrowing**: the invariant and guard
+are assumed by shrinking the state box first, so the proof lands over **unbounded** state (the whole
+`u64` range) with no splitting. A non-inductive invariant is refuted with the concrete state that breaks it.
+
+```rust
+use aion_verify::symbolic::{prove_inductive, Expr, Iv, Prop, SymVerdict};
+// A counter starting at 5 that only increments: prove `i >= 5` on every iteration, over ALL of u64.
+let init = &[Iv::new(5, 5)];
+let guard = Prop::Le(Expr::var(), Expr::c(1_000_000_000));   // loop while i <= 1e9
+let step = &[Expr::var().add(Expr::c(1))];                   // i' = i + 1
+let inv = Prop::Ge(Expr::var(), Expr::c(5));                 // i >= 5
+assert_eq!(prove_inductive(init, &guard, step, &inv, &[Iv::full()], 8), SymVerdict::Proven);
+```
+
 ## Tamper-evident proof ledger (`ledger` module)
 
 A proof is only trustworthy if its result can't be quietly forged or deleted. `ledger` records each

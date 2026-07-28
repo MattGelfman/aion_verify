@@ -592,6 +592,84 @@ pub fn prove_contract(doms: &[Iv], precond: &Prop, postcond: &Prop) -> SymVerdic
 /// Returns [`SymVerdict::Proven`] only when both hold; otherwise the failing check's verdict (a
 /// `Refuted` names a concrete state that breaks it). `max_splits` bounds the refinement used on each
 /// verification condition. This handles **state**, which the value-only tiers do not.
+const fn as_var(e: &Expr) -> Option<u32> {
+    if let Expr::Var(i) = e {
+        Some(*i)
+    } else {
+        None
+    }
+}
+const fn as_const(e: &Expr) -> Option<u64> {
+    if let Expr::Const(v) = e {
+        Some(*v)
+    } else {
+        None
+    }
+}
+
+/// Narrow a domain box by the box-expressible constraints in `p` (conjunctions of `variable vs constant`
+/// comparisons) — "assume `p` holds". Returns `None` if the constraints make the box empty (so `p` is
+/// unsatisfiable on it). Relational/disjunctive parts are ignored (a sound over-approximation: we assume
+/// *less*, so a proof over the wider box still holds). This is Phase G's key move: assume the invariant
+/// and guard, then prove preservation on the *narrowed* region — which works over UNBOUNDED state.
+fn assume_narrow(p: &Prop, doms: &[Iv]) -> Option<Vec<Iv>> {
+    let mut d = doms.to_vec();
+    fn le(a: &Expr, b: &Expr, d: &mut [Iv]) -> Option<()> {
+        if let (Some(vi), Some(c)) = (as_var(a), as_const(b)) {
+            let iv = d.get_mut(vi as usize)?;
+            iv.hi = iv.hi.min(c);
+            if iv.lo > iv.hi {
+                return None;
+            }
+        } else if let (Some(c), Some(vi)) = (as_const(a), as_var(b)) {
+            let iv = d.get_mut(vi as usize)?;
+            iv.lo = iv.lo.max(c);
+            if iv.lo > iv.hi {
+                return None;
+            }
+        }
+        Some(())
+    }
+    fn lt(a: &Expr, b: &Expr, d: &mut [Iv]) -> Option<()> {
+        if let (Some(vi), Some(c)) = (as_var(a), as_const(b)) {
+            if c == 0 {
+                return None; // var < 0 is impossible for unsigned
+            }
+            let iv = d.get_mut(vi as usize)?;
+            iv.hi = iv.hi.min(c - 1);
+            if iv.lo > iv.hi {
+                return None;
+            }
+        } else if let (Some(c), Some(vi)) = (as_const(a), as_var(b)) {
+            let iv = d.get_mut(vi as usize)?;
+            iv.lo = iv.lo.max(c.saturating_add(1));
+            if iv.lo > iv.hi {
+                return None;
+            }
+        }
+        Some(())
+    }
+    fn go(p: &Prop, d: &mut [Iv]) -> Option<()> {
+        match p {
+            Prop::And(a, b) => {
+                go(a, d)?;
+                go(b, d)
+            }
+            Prop::Le(a, b) => le(a, b, d),
+            Prop::Lt(a, b) => lt(a, b, d),
+            Prop::Ge(a, b) => le(b, a, d),
+            Prop::Gt(a, b) => lt(b, a, d),
+            Prop::Eq(a, b) => {
+                le(a, b, d)?;
+                le(b, a, d)
+            }
+            _ => Some(()), // Or / Not / Ne / relational: no box narrowing (assume less — sound)
+        }
+    }
+    go(p, &mut d)?;
+    Some(d)
+}
+
 pub fn prove_inductive(
     init_doms: &[Iv],
     guard: &Prop,
@@ -606,11 +684,22 @@ pub fn prove_inductive(
         return initiation;
     }
     // 2. Consecution: (invariant ∧ guard) ⇒ invariant after one step.
-    let vc = invariant
-        .clone()
-        .and(guard.clone())
-        .implies(invariant.subst(transition));
-    prove_forall_refine(state_doms, &vc, max_splits)
+    let inv_next = invariant.subst(transition);
+    let assumption = invariant.clone().and(guard.clone());
+    // Phase G: assume the invariant+guard by narrowing the state box, then prove preservation there.
+    // This discharges the common (box-expressible) case over UNBOUNDED state with no refinement.
+    match assume_narrow(&assumption, state_doms) {
+        None => SymVerdict::Proven, // no state satisfies (invariant ∧ guard) here — vacuously preserved
+        Some(narrowed) => {
+            if prove_forall_refine(&narrowed, &inv_next, max_splits) == SymVerdict::Proven {
+                return SymVerdict::Proven;
+            }
+            // Narrowing dropped a relational part (or it genuinely fails) — fall back to the full,
+            // always-sound verification condition over the whole state domain.
+            let vc = assumption.implies(inv_next);
+            prove_forall_refine(state_doms, &vc, max_splits)
+        }
+    }
 }
 
 /// When the abstraction can't decide, try the assignments most likely to break a property — the corners

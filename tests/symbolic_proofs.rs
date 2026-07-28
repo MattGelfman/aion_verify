@@ -246,6 +246,42 @@ fn catches_a_non_inductive_invariant() {
     }
 }
 
+// ── Phase G — assume-narrowing: inductive invariants over UNBOUNDED state ───────────────────────────
+
+#[test]
+fn proves_an_inductive_invariant_over_unbounded_state() {
+    // The SAME counter as Phase F, but the reachable state space is now the ENTIRE u64 domain — the
+    // loop guard is the only thing keeping i in range, and the state box is [0, u64::MAX]. Phase F's
+    // plain verification condition would need to refine an astronomically large box; Phase G assumes
+    // (i >= 5 ∧ guard) by narrowing the box to [5, ...] first, so preservation proves with no splitting.
+    let init = &[Iv::new(5, 5)];
+    let guard = Prop::Le(Expr::var(), Expr::c(1_000_000_000));
+    let transition = &[Expr::var().add(Expr::c(1))];
+    let invariant = Prop::Ge(Expr::var(), Expr::c(5));
+    let state = &[Iv::full()]; // UNBOUNDED — every u64 is a candidate state
+    assert_eq!(
+        prove_inductive(init, &guard, transition, &invariant, state, 8),
+        SymVerdict::Proven
+    );
+}
+
+#[test]
+fn narrowing_still_catches_a_non_inductive_invariant_over_unbounded_state() {
+    // Soundness guard for Phase G: `i <= 5` is NOT preserved by an unconditional increment. Even with
+    // assume-narrowing and an unbounded state box, the prover must fall back to the full VC and refute
+    // it — never a false Proven from the narrowing shortcut.
+    let init = &[Iv::new(0, 0)];
+    let guard = Prop::Le(Expr::var(), Expr::c(1_000_000_000));
+    let transition = &[Expr::var().add(Expr::c(1))];
+    let invariant = Prop::Le(Expr::var(), Expr::c(5));
+    let state = &[Iv::full()];
+    assert_ne!(
+        prove_inductive(init, &guard, transition, &invariant, state, 64),
+        SymVerdict::Proven,
+        "assume-narrowing must never falsely prove a non-inductive invariant"
+    );
+}
+
 #[test]
 fn u64_max_boundary_is_safe() {
     // Reasoning at the very top of the domain must never overflow or panic.
