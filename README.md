@@ -60,6 +60,34 @@ assert!(v.is_proven());
 
 Each returns a `Verdict<T>`: `is_proven()`, `cases()`, and `counterexample() -> Option<&T>`.
 
+### Vacuity — when a passing proof proves nothing
+
+A proof over an empty domain trivially succeeds. If `for_all_where`'s precondition rejects every
+input, the verdict is `Proven { cases: 0 }`: nothing was tested, yet `is_proven()` returns `true`.
+This is the most common way a proof suite quietly stops proving anything — a precondition drifts out
+of sync with the domain, and the tests stay green.
+
+```rust
+use aion_verify::for_all_where;
+
+let hi = core::hint::black_box(100u8);
+// No u8 is both > 200 and < 100, so the predicate below is never even reached.
+let v = for_all_where(0u8..=255, |&x| x > 200 && x < hi, |_| false);
+
+assert!(v.is_proven());            // reads as success
+assert!(v.is_vacuous());           // but nothing was checked
+assert!(!v.is_proven_nonvacuous()); // the assertion you actually want
+```
+
+Prefer **`is_proven_nonvacuous()`** in test assertions. It is `is_proven()` plus the requirement that
+at least one input reached the predicate.
+
+One caveat, stated plainly: this catches an *empty domain*, not a *trivial predicate*. A predicate
+like `|x: i8| x <= 127` is true by the type's own range and proves nothing about the code under test,
+but it is indistinguishable from a hard-won property by enumeration alone. Guard against that by
+comparing against an independently computed reference value, or by checking that the proof fails when
+you deliberately mutate the implementation.
+
 ## Tier 5 — symbolic proofs over *unbounded* domains (`symbolic` module)
 
 Tier 4 enumerates, so it needs a finite domain. Tier 5 proves properties over the **entire** domain —

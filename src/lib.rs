@@ -48,8 +48,57 @@ pub enum Verdict<T> {
 }
 
 impl<T> Verdict<T> {
+    /// True when the predicate was never refuted.
+    ///
+    /// **Caution — this is true for a vacuous proof.** A `Proven { cases: 0 }` verdict means the
+    /// predicate was never actually evaluated, because the domain was empty or a precondition filtered
+    /// every input out. Prefer [`is_proven_nonvacuous`](Self::is_proven_nonvacuous) in assertions.
     pub fn is_proven(&self) -> bool {
         matches!(self, Verdict::Proven { .. })
+    }
+
+    /// True when the verdict is `Proven` but **zero inputs were checked** — a vacuous proof.
+    ///
+    /// This is the classic vacuity problem from model checking. `for_all_where(inputs, precond, pred)`
+    /// reports `Proven` when `precond` rejected every input: nothing was tested, so nothing was proven,
+    /// yet the verdict reads as success. The usual cause is a precondition that over-constrains — an
+    /// `assume` that is stricter than the author believed, or that contradicts the domain outright.
+    ///
+    /// ```
+    /// use aion_verify::for_all_where;
+    /// // No u8 satisfies both `x > 200` and `x < 100`, so nothing is ever checked.
+    /// // `black_box` hides the contradiction from the optimizer and the linter.
+    /// let hi = core::hint::black_box(100u8);
+    /// let v = for_all_where(0u8..=255, |&x| x > 200 && x < hi, |_| false);
+    /// assert!(v.is_proven(), "reads as success...");
+    /// assert!(v.is_vacuous(), "...but proves nothing -- note the predicate is literally `false`");
+    /// assert!(!v.is_proven_nonvacuous());
+    /// ```
+    pub fn is_vacuous(&self) -> bool {
+        matches!(self, Verdict::Proven { cases: 0 })
+    }
+
+    /// [`is_proven`](Self::is_proven) with the vacuity hole closed: the predicate held **and** at least
+    /// one input actually reached it. This is what a test assertion should use.
+    ///
+    /// ```
+    /// use aion_verify::for_all_in;
+    /// let v = for_all_in(0, 100, |x| x <= 100);
+    /// assert!(v.is_proven_nonvacuous());
+    /// ```
+    ///
+    /// # What this does not catch
+    ///
+    /// Vacuity comes in two forms, and only one is detectable from outside the predicate:
+    ///
+    /// - **Empty domain** — nothing was checked. Decidable; this method catches it.
+    /// - **Trivial predicate** — plenty was checked, but the predicate cannot fail. `|x: i8| x <= 127`
+    ///   is true by the type's own range, so it proves nothing about the code under test. No amount of
+    ///   enumeration distinguishes a trivially-true property from a hard-won one, so this is *not*
+    ///   detectable here. Guard against it by writing predicates that compare against an independently
+    ///   computed reference value, or by confirming the proof fails when the implementation is mutated.
+    pub fn is_proven_nonvacuous(&self) -> bool {
+        matches!(self, Verdict::Proven { cases } if *cases > 0)
     }
     /// Inputs examined (all of them on Proven; the ones that passed before the failure on Refuted).
     pub fn cases(&self) -> u64 {
@@ -87,6 +136,14 @@ where
 
 /// Like [`for_all`] but only over inputs satisfying `precond` — the equivalent of a `kani::assume` guard.
 /// Proves `pred` on every input where the precondition holds.
+///
+/// # Vacuity warning
+///
+/// If `precond` rejects every input, this returns `Proven { cases: 0 }` — a **vacuous** proof that
+/// reads as success while having tested nothing. This is the most common way a proof suite silently
+/// stops proving anything: a precondition drifts out of sync with the domain, and every test still
+/// passes. Assert with [`Verdict::is_proven_nonvacuous`] rather than [`Verdict::is_proven`], or check
+/// [`Verdict::cases`] against the count you expect.
 pub fn for_all_where<I, T, P, F>(inputs: I, precond: P, pred: F) -> Verdict<T>
 where
     I: IntoIterator<Item = T>,
@@ -150,6 +207,62 @@ mod tests {
         let v = for_all_u8(|x| (x as u16) + 1 > x as u16);
         assert!(v.is_proven());
         assert_eq!(v.cases(), 256, "every u8 checked — a proof, not a sample");
+    }
+
+    #[test]
+    fn vacuous_proofs_are_flagged_when_a_precondition_filters_everything_out() {
+        // The predicate is `false` -- it could never hold for any input. But the precondition is
+        // unsatisfiable, so the predicate is never reached and the verdict reads as Proven.
+        // `black_box` keeps the contradiction opaque to the optimizer and to clippy, which would
+        // otherwise reject `x > 200 && x < 100` as a comparison that can never be true -- correct in
+        // general, and exactly the situation being tested here.
+        let hi = core::hint::black_box(100u8);
+        let v = for_all_where(0u8..=255, |&x| x > 200 && x < hi, |_| false);
+
+        assert!(v.is_proven(), "the legacy check reports success");
+        assert_eq!(v.cases(), 0, "because nothing was ever checked");
+        assert!(
+            v.is_vacuous(),
+            "which is exactly what is_vacuous exists to surface"
+        );
+        assert!(
+            !v.is_proven_nonvacuous(),
+            "and the safe assertion refuses it"
+        );
+    }
+
+    #[test]
+    fn an_empty_domain_is_vacuous_too() {
+        // Not just preconditions: any empty input iterator yields the same hollow Proven.
+        let v: Verdict<u64> = for_all_in(10, 0, |_| false);
+        assert!(v.is_vacuous(), "lo > hi means an empty range");
+        assert!(!v.is_proven_nonvacuous());
+    }
+
+    #[test]
+    fn a_real_proof_is_nonvacuous() {
+        let v = for_all_u8(|x| (x as u16) + 1 > x as u16);
+        assert!(
+            v.is_proven_nonvacuous(),
+            "256 inputs actually reached the predicate"
+        );
+        assert!(!v.is_vacuous());
+
+        // A satisfiable precondition still leaves witnesses behind.
+        let w = for_all_where(0u8..=255, |&x| x % 2 == 0, |&x| x % 2 == 0);
+        assert!(w.is_proven_nonvacuous());
+        assert_eq!(w.cases(), 128);
+    }
+
+    #[test]
+    fn refuted_verdicts_are_never_vacuous() {
+        // A counterexample is proof the predicate was reached, so vacuity cannot apply.
+        let v = for_all_u8(|x| x < 200);
+        assert!(!v.is_vacuous());
+        assert!(
+            !v.is_proven_nonvacuous(),
+            "refuted is not proven, vacuous or otherwise"
+        );
     }
 
     #[test]

@@ -1,11 +1,11 @@
 [package]
 name = "aion_verify"
-version = "3.6.0"
+version = "3.7.0"
 edition = "2021"
 rust-version = "1.70"
 license = "MPL-2.0"
 description = "A pure-Rust proof stack: tier 4 exhaustively checks a predicate over a bounded domain; tier 5 proves properties over UNBOUNDED, multi-variable domains via interval abstract interpretation + branch-and-bound refinement + affine relational reasoning, with function contracts. Plus a tamper-evident SHA-512 hash-chain ledger and a post-quantum (hash-based WOTS) signature so proof results are provably yours and immune to Shor. no_std, no unsafe, no dependencies, no external solver."
-repository = "https://github.com/MattGelfman/aion_verify"
+repository = "https://github.com/NubbyNubkins/aion_verify"
 documentation = "https://docs.rs/aion_verify"
 readme = "README.md"
 keywords = ["verification", "proof", "property-testing", "no-std", "testing"]
