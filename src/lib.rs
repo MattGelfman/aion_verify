@@ -4,17 +4,32 @@
 
 //! AION OS — first-party proof engine (`aion_verify`).
 //!
-//! "Our validation and proof functions should do everything Kani does" — for **enumerable and bounded**
-//! domains, this delivers exactly that: it checks a predicate against **every** input in the domain and
-//! returns a [`Verdict`] of either `Proven { cases }` (complete coverage — a proof) or `Refuted` **with the
-//! counterexample** that broke it. That is the same guarantee a bounded model checker gives over a bounded
-//! space: not a sample, the whole space.
+//! It checks a predicate against **every** input in a bounded domain and returns a [`Verdict`] of either
+//! `Proven { cases }` (complete coverage — a proof) or `Refuted` **with the counterexample** that broke
+//! it. Over that domain the guarantee is the real thing: not a sample, the whole space.
 //!
-//! What it does NOT do (and why Kani stays): it brute-force **enumerates**, so it cannot cover astronomically
-//! large domains the way Kani's symbolic/SAT reasoning (CBMC) can. So `aion_verify` is the everyday,
-//! first-party tier-4 engine for finite/bounded invariants, and **Kani (tier 5) remains the independent,
-//! third-party proof** — symbolic coverage of the large cases plus an outside confirmation of ours. Two
-//! tiers, two independent methods, per AION's validation doctrine.
+//! # What this is not
+//!
+//! An earlier version of these docs claimed this "does everything Kani does" for bounded domains. That
+//! was an overstatement, and it is worth being precise about, because the gap is not only about domain
+//! size:
+//!
+//! - **It enumerates concretely.** Astronomically large domains are out of reach in a way Kani's
+//!   symbolic/SAT reasoning (CBMC) is not. That is the well-known limit, and tier 5 ([`symbolic`])
+//!   addresses part of it with abstract interpretation.
+//! - **It only checks the predicate you write.** Kani additionally verifies properties you never stated
+//!   — memory safety, arithmetic overflow, out-of-bounds indexing, unreachable panics — automatically,
+//!   for all paths. This engine will happily report `Proven` for code that panics on an input your
+//!   predicate did not think to examine.
+//! - **It runs one path per input.** Kani reasons over all execution paths at once. Concrete execution
+//!   covers only the path each concrete input happens to take.
+//! - **A passing verdict can be hollow.** See [`Verdict::is_vacuous`] — an empty domain proves nothing,
+//!   and a predicate that cannot fail proves nothing either.
+//!
+//! So: `aion_verify` is the everyday, first-party, zero-dependency engine for finite and bounded
+//! invariants, and **Kani remains the independent, third-party formal check** — symbolic coverage of the
+//! large cases, the automatic safety properties, and an outside confirmation of ours. Two tiers, two
+//! independent methods. It complements Kani; it does not replace it.
 //!
 //! `no_std`, `#![forbid(unsafe_code)]`.
 #![forbid(unsafe_code)]
