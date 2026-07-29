@@ -88,6 +88,67 @@ but it is indistinguishable from a hard-won property by enumeration alone. Guard
 comparing against an independently computed reference value, or by checking that the proof fails when
 you deliberately mutate the implementation.
 
+## Automatic safety — properties you never wrote a predicate for
+
+A bounded model checker verifies things you never stated: index-out-of-bounds, arithmetic overflow,
+`unwrap` on `None`, division by zero. Those come from the language, not from an assertion the author
+made. Two routes here cover that ground.
+
+**By execution** (needs the `std` feature) — Rust already emits those checks as runtime panics, so
+running every input in the domain and catching the unwind proves none of them can fire:
+
+```rust
+use aion_verify::safety::verify_no_panic;
+
+let table = [10u32, 20, 30];
+// No predicate written. The out-of-bounds index is found anyway.
+let s = verify_no_panic(0usize..=3, |&i| { let _ = table[i]; });
+
+assert!(s.panicked());
+assert_eq!(s.failing_input(), Some(&3));
+assert!(s.message().unwrap().contains("index out of bounds"));
+```
+
+`for_all_safe` combines this with a predicate, and distinguishes "the code crashed" from "the
+invariant is false" — collapsing those would hide a latent crash inside an ordinary refutation.
+
+**Symbolically** — over *unbounded* domains, and independent of the build profile. This matters:
+Rust only panics on integer overflow under `debug-assertions` and wraps silently in release, so the
+execution route above cannot answer the question for a release build.
+
+```rust
+use aion_verify::symbolic::{prove_no_overflow, Expr, Iv, SymVerdict};
+
+// x + 1 over the full u64 domain overflows at x = u64::MAX -- with a confirmed witness.
+let e = Expr::var().add(Expr::c(1));
+assert!(matches!(prove_no_overflow(&[Iv::full()], &e), SymVerdict::Refuted { .. }));
+
+// Constrain the domain and the same expression is provably safe.
+assert_eq!(prove_no_overflow(&[Iv::new(0, 1000)], &e), SymVerdict::Proven);
+```
+
+A `Refuted` is always backed by an assignment confirmed with checked arithmetic, never by interval
+imprecision alone. Where the abstraction loses correlation between variables — `x - x` is the
+canonical case — the answer is an honest `Unknown`, never a wrong verdict.
+
+### Requirements
+
+The `safety` module needs `features = ["std"]` and an unwinding panic profile (`panic = "abort"`
+leaves nothing to catch). It raises the crate MSRV to **1.81** when enabled. The crate is `no_std`
+with zero dependencies by default, unchanged.
+
+## What this still is not
+
+Two real gaps remain against a compiler-driven checker like Kani:
+
+- **It does not read your code.** Kani compiles actual Rust MIR. Tier 4 here executes a closure you
+  pass it; tier 5 analyses an `Expr` you build by hand. A model that drifts from the implementation
+  proves things about the model, not the code.
+- **It only covers code that is reached.** Tier 4 covers exactly the paths the enumerated inputs
+  take, and cannot see a function nobody called.
+
+It complements Kani; it does not replace it.
+
 ## Tier 5 — symbolic proofs over *unbounded* domains (`symbolic` module)
 
 Tier 4 enumerates, so it needs a finite domain. Tier 5 proves properties over the **entire** domain —

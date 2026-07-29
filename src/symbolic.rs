@@ -804,3 +804,312 @@ fn refine(doms: &[Iv], prop: &Prop, budget: &mut u32) -> SymVerdict {
         }
     }
 }
+
+// ── Automatic arithmetic-safety properties ────────────────────────────────────────────────────────
+// Kani checks overflow, underflow, and division by zero without being asked, because they follow from
+// the language semantics rather than from a property the author stated. `safety::verify_no_panic`
+// reaches the same result by execution, but only over a bounded domain and only when the build profile
+// has `debug-assertions` on (release builds wrap silently). The functions below answer the same
+// question symbolically: over UNBOUNDED domains, and independent of the build profile.
+
+/// An arithmetic fault an expression can exhibit at run time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fault {
+    /// `a + b` exceeded `u64::MAX`.
+    AddOverflow,
+    /// `a - b` went below zero.
+    SubUnderflow,
+    /// `a * b` exceeded `u64::MAX`.
+    MulOverflow,
+    /// `a << k` shifted bits out, or `k >= 64`.
+    ShlOverflow,
+    /// `a % 0`.
+    DivByZero,
+}
+
+impl Expr {
+    /// Concrete evaluation with **checked** arithmetic: returns the first fault instead of wrapping.
+    ///
+    /// [`Expr::eval_at`] deliberately wraps, modelling release-mode Rust. This is its counterpart,
+    /// modelling debug-mode Rust, and is what confirms a witness is genuine rather than an artefact of
+    /// interval imprecision.
+    fn eval_checked(&self, xs: &[u64]) -> Result<u64, Fault> {
+        match self {
+            Expr::Var(i) => Ok(xs.get(*i as usize).copied().unwrap_or(0)),
+            Expr::Const(v) => Ok(*v),
+            Expr::Add(a, b) => a
+                .eval_checked(xs)?
+                .checked_add(b.eval_checked(xs)?)
+                .ok_or(Fault::AddOverflow),
+            Expr::Sub(a, b) => a
+                .eval_checked(xs)?
+                .checked_sub(b.eval_checked(xs)?)
+                .ok_or(Fault::SubUnderflow),
+            Expr::Mul(a, b) => a
+                .eval_checked(xs)?
+                .checked_mul(b.eval_checked(xs)?)
+                .ok_or(Fault::MulOverflow),
+            Expr::Shl(a, k) => {
+                let v = a.eval_checked(xs)?;
+                if *k >= 64 || v > (u64::MAX >> *k) {
+                    Err(Fault::ShlOverflow)
+                } else {
+                    Ok(v << *k)
+                }
+            }
+            Expr::Shr(a, k) => Ok(if *k >= 64 {
+                0
+            } else {
+                a.eval_checked(xs)? >> *k
+            }),
+            Expr::And(a, m) => Ok(a.eval_checked(xs)? & *m),
+            Expr::Or(a, m) => Ok(a.eval_checked(xs)? | *m),
+            Expr::Rem(a, m) => {
+                let v = a.eval_checked(xs)?;
+                if *m == 0 {
+                    Err(Fault::DivByZero)
+                } else {
+                    Ok(v % *m)
+                }
+            }
+        }
+    }
+
+    /// True when interval reasoning establishes that NO node in this expression can fault over `doms`.
+    ///
+    /// Sound in the direction that matters: `true` means fault-free for certain (every reachable value
+    /// lies within the interval, and the interval endpoints are safe). `false` means "cannot rule it
+    /// out", not "faults" — interval analysis loses correlation between variables, so `x - x` is
+    /// reported as possibly-underflowing even though it never is.
+    fn cannot_fault(&self, doms: &[Iv]) -> bool {
+        match self {
+            Expr::Var(_) | Expr::Const(_) => true,
+            Expr::Add(a, b) => {
+                a.cannot_fault(doms)
+                    && b.cannot_fault(doms)
+                    && a.eval_iv(doms).hi.checked_add(b.eval_iv(doms).hi).is_some()
+            }
+            Expr::Sub(a, b) => {
+                a.cannot_fault(doms)
+                    && b.cannot_fault(doms)
+                    && a.eval_iv(doms).lo >= b.eval_iv(doms).hi
+            }
+            Expr::Mul(a, b) => {
+                a.cannot_fault(doms)
+                    && b.cannot_fault(doms)
+                    && a.eval_iv(doms).hi.checked_mul(b.eval_iv(doms).hi).is_some()
+            }
+            Expr::Shl(a, k) => {
+                a.cannot_fault(doms) && *k < 64 && a.eval_iv(doms).hi <= (u64::MAX >> *k)
+            }
+            Expr::Shr(a, _) | Expr::And(a, _) | Expr::Or(a, _) => a.cannot_fault(doms),
+            Expr::Rem(a, m) => a.cannot_fault(doms) && *m != 0,
+        }
+    }
+}
+
+/// Corner assignments of `doms`: each variable at its low or high endpoint.
+///
+/// Extremes are where arithmetic faults live, so corners are where a witness is most likely to be
+/// found. Capped at `MAX_CORNER_VARS` variables to keep this from becoming exponential; beyond that
+/// only the all-low and all-high corners are tried, which can turn a `Refuted` into an honest
+/// `Unknown` but never produces a wrong answer.
+fn corner_assignments(doms: &[Iv]) -> Vec<Vec<u64>> {
+    const MAX_CORNER_VARS: usize = 10;
+    let n = doms.len();
+    if n == 0 {
+        return alloc::vec![Vec::new()];
+    }
+    if n > MAX_CORNER_VARS {
+        return alloc::vec![
+            doms.iter().map(|d| d.lo).collect(),
+            doms.iter().map(|d| d.hi).collect(),
+        ];
+    }
+    let mut out = Vec::with_capacity(1usize << n);
+    for mask in 0u32..(1u32 << n) {
+        out.push(
+            doms.iter()
+                .enumerate()
+                .map(|(i, d)| if mask >> i & 1 == 1 { d.hi } else { d.lo })
+                .collect(),
+        );
+    }
+    out
+}
+
+/// Prove that evaluating `e` **cannot overflow, underflow, or divide by zero** for any assignment in
+/// `doms` — symbolically, over unbounded domains, without enumeration.
+///
+/// This is an automatic property in the model-checking sense: you state no invariant, and the faults
+/// come from the arithmetic itself. It is the profile-independent counterpart to
+/// [`safety::verify_no_panic`](crate::safety::verify_no_panic), which finds the same faults by
+/// execution but only over a bounded domain and only under `debug-assertions`.
+///
+/// - `Proven` — no assignment in the domain can fault. Sound: established over a superset of the domain.
+/// - `Refuted { witness }` — a concrete assignment that genuinely faults, confirmed with checked
+///   arithmetic. Never spurious.
+/// - `Unknown` — interval reasoning could not rule a fault out and no corner assignment exhibited one.
+///   Interval analysis discards correlation between variables, so `x - x` lands here.
+///
+/// ```
+/// use aion_verify::symbolic::{prove_no_overflow, Expr, Iv, SymVerdict};
+///
+/// // x + 1 over the full u64 domain overflows at x = u64::MAX.
+/// let e = Expr::var().add(Expr::c(1));
+/// assert!(matches!(prove_no_overflow(&[Iv::full()], &e), SymVerdict::Refuted { .. }));
+///
+/// // Constrain the domain and the same expression is provably safe.
+/// assert_eq!(prove_no_overflow(&[Iv::new(0, 1000)], &e), SymVerdict::Proven);
+/// ```
+pub fn prove_no_overflow(doms: &[Iv], e: &Expr) -> SymVerdict {
+    if e.cannot_fault(doms) {
+        return SymVerdict::Proven;
+    }
+    // A fault could not be ruled out. Look for a genuine witness at the domain corners before
+    // reporting anything -- an unconfirmed "may fault" must never be presented as a refutation.
+    for xs in corner_assignments(doms) {
+        if e.eval_checked(&xs).is_err() {
+            return SymVerdict::Refuted { witness: xs };
+        }
+    }
+    SymVerdict::Unknown
+}
+
+/// The specific [`Fault`] an assignment triggers, or `None` if it evaluates cleanly.
+///
+/// Useful for reporting *why* a [`prove_no_overflow`] witness fails.
+pub fn fault_at(e: &Expr, xs: &[u64]) -> Option<Fault> {
+    e.eval_checked(xs).err()
+}
+
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+
+    #[test]
+    fn unbounded_increment_is_refuted_with_a_real_witness() {
+        let e = Expr::var().add(Expr::c(1));
+        match prove_no_overflow(&[Iv::full()], &e) {
+            SymVerdict::Refuted { witness } => {
+                assert_eq!(witness, alloc::vec![u64::MAX]);
+                assert_eq!(fault_at(&e, &witness), Some(Fault::AddOverflow));
+            }
+            other => panic!("expected Refuted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_constrained_domain_makes_the_same_expression_provably_safe() {
+        let e = Expr::var().add(Expr::c(1));
+        assert_eq!(
+            prove_no_overflow(&[Iv::new(0, 1000)], &e),
+            SymVerdict::Proven
+        );
+        // Right at the boundary it is still safe: u64::MAX - 1 plus 1 fits exactly.
+        assert_eq!(
+            prove_no_overflow(&[Iv::new(0, u64::MAX - 1)], &e),
+            SymVerdict::Proven
+        );
+    }
+
+    #[test]
+    fn subtraction_underflow_is_found() {
+        // x - 5 underflows whenever x < 5.
+        let e = Expr::var().sub(Expr::c(5));
+        match prove_no_overflow(&[Iv::new(0, 100)], &e) {
+            SymVerdict::Refuted { witness } => {
+                assert_eq!(fault_at(&e, &witness), Some(Fault::SubUnderflow));
+            }
+            other => panic!("expected Refuted, got {other:?}"),
+        }
+        // Constrain x >= 5 and it is safe.
+        assert_eq!(
+            prove_no_overflow(&[Iv::new(5, 100)], &e),
+            SymVerdict::Proven
+        );
+    }
+
+    #[test]
+    fn multiplication_overflow_is_found() {
+        let e = Expr::var().mul(Expr::var_at(1));
+        let doms = [Iv::new(0, u64::MAX), Iv::new(0, u64::MAX)];
+        match prove_no_overflow(&doms, &e) {
+            SymVerdict::Refuted { witness } => {
+                assert_eq!(fault_at(&e, &witness), Some(Fault::MulOverflow));
+            }
+            other => panic!("expected Refuted, got {other:?}"),
+        }
+        // Bounded factors whose product fits are proven safe.
+        assert_eq!(
+            prove_no_overflow(&[Iv::new(0, 1_000_000), Iv::new(0, 1_000_000)], &e),
+            SymVerdict::Proven
+        );
+    }
+
+    #[test]
+    fn division_by_zero_is_found_without_being_asked() {
+        let e = Expr::var().rem(0);
+        match prove_no_overflow(&[Iv::new(0, 10)], &e) {
+            SymVerdict::Refuted { witness } => {
+                assert_eq!(fault_at(&e, &witness), Some(Fault::DivByZero));
+            }
+            other => panic!("expected Refuted, got {other:?}"),
+        }
+        assert_eq!(
+            prove_no_overflow(&[Iv::new(0, 10)], &Expr::var().rem(7)),
+            SymVerdict::Proven
+        );
+    }
+
+    #[test]
+    fn shift_overflow_is_found() {
+        let e = Expr::var().shl(60);
+        match prove_no_overflow(&[Iv::full()], &e) {
+            SymVerdict::Refuted { witness } => {
+                assert_eq!(fault_at(&e, &witness), Some(Fault::ShlOverflow));
+            }
+            other => panic!("expected Refuted, got {other:?}"),
+        }
+        // Values small enough that 60 bits of headroom remain are safe.
+        assert_eq!(prove_no_overflow(&[Iv::new(0, 15)], &e), SymVerdict::Proven);
+    }
+
+    #[test]
+    fn correlation_loss_yields_an_honest_unknown_not_a_false_refutation() {
+        // x - x is always 0 and never underflows, but interval analysis treats the two occurrences as
+        // independent and cannot see that. The correct answer is Unknown -- NOT Refuted, since no
+        // assignment actually faults, and NOT Proven, since the abstraction cannot establish it.
+        let e = Expr::var().sub(Expr::var());
+        assert_eq!(
+            prove_no_overflow(&[Iv::new(1, 100)], &e),
+            SymVerdict::Unknown,
+            "imprecision must surface as Unknown, never as a wrong verdict"
+        );
+        // And the soundness claim is real: no corner assignment actually faults.
+        for xs in corner_assignments(&[Iv::new(1, 100)]) {
+            assert!(e.eval_checked(&xs).is_ok(), "x - x never faults");
+        }
+    }
+
+    #[test]
+    fn nested_expressions_propagate_faults_from_subterms() {
+        // (x * x) + 1: the inner multiplication is the fault, and it must not be masked by the outer add.
+        let e = Expr::var().mul(Expr::var()).add(Expr::c(1));
+        assert!(matches!(
+            prove_no_overflow(&[Iv::full()], &e),
+            SymVerdict::Refuted { .. }
+        ));
+        assert_eq!(
+            prove_no_overflow(&[Iv::new(0, 1000)], &e),
+            SymVerdict::Proven
+        );
+    }
+
+    #[test]
+    fn masking_operations_never_fault() {
+        // And/Or/Shr cannot overflow, so they are provably safe over any domain.
+        let e = Expr::var().and(0xFF).or(0x0F).shr(2);
+        assert_eq!(prove_no_overflow(&[Iv::full()], &e), SymVerdict::Proven);
+    }
+}

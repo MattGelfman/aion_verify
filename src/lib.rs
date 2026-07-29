@@ -8,34 +8,49 @@
 //! `Proven { cases }` (complete coverage — a proof) or `Refuted` **with the counterexample** that broke
 //! it. Over that domain the guarantee is the real thing: not a sample, the whole space.
 //!
-//! # What this is not
+//! # Automatic properties — not just the predicate you write
 //!
-//! An earlier version of these docs claimed this "does everything Kani does" for bounded domains. That
-//! was an overstatement, and it is worth being precise about, because the gap is not only about domain
-//! size:
+//! A bounded model checker like Kani verifies properties you never stated: index-out-of-bounds,
+//! arithmetic overflow, `unwrap` on `None`, division by zero. Those follow from the language, not from
+//! anything the author asserted. Two modules cover that ground here, by different routes:
 //!
-//! - **It enumerates concretely.** Astronomically large domains are out of reach in a way Kani's
-//!   symbolic/SAT reasoning (CBMC) is not. That is the well-known limit, and tier 5 ([`symbolic`])
-//!   addresses part of it with abstract interpretation.
-//! - **It only checks the predicate you write.** Kani additionally verifies properties you never stated
-//!   — memory safety, arithmetic overflow, out-of-bounds indexing, unreachable panics — automatically,
-//!   for all paths. This engine will happily report `Proven` for code that panics on an input your
-//!   predicate did not think to examine.
-//! - **It runs one path per input.** Kani reasons over all execution paths at once. Concrete execution
-//!   covers only the path each concrete input happens to take.
-//! - **A passing verdict can be hollow.** See [`Verdict::is_vacuous`] — an empty domain proves nothing,
-//!   and a predicate that cannot fail proves nothing either.
+//! - [`safety::verify_no_panic`] runs the code over every input in a bounded domain and catches any
+//!   unwind. Rust already emits those checks as panics, so exhaustive execution proves no input in the
+//!   domain can panic. Requires the `std` feature and an unwinding profile.
+//! - [`symbolic::prove_no_overflow`] answers the same question *symbolically*, over unbounded domains
+//!   and independent of the build profile — which matters because Rust only panics on integer overflow
+//!   under `debug-assertions`, and wraps silently in release.
 //!
-//! So: `aion_verify` is the everyday, first-party, zero-dependency engine for finite and bounded
-//! invariants, and **Kani remains the independent, third-party formal check** — symbolic coverage of the
-//! large cases, the automatic safety properties, and an outside confirmation of ours. Two tiers, two
-//! independent methods. It complements Kani; it does not replace it.
+//! # What this still is not
+//!
+//! Two real gaps remain against a compiler-driven checker, and they are worth stating plainly:
+//!
+//! - **It does not read your code.** Kani compiles actual Rust MIR and reasons about the program as
+//!   written. Tier 4 here executes a closure you hand it; tier 5 analyses an [`symbolic::Expr`] you
+//!   build by hand. Modelling a function as an `Expr` is manual work, and a model that drifts from the
+//!   implementation proves things about the model, not the code.
+//! - **It only covers code that is reached.** Tier 4 covers exactly the paths the enumerated inputs
+//!   take, and cannot see a function nobody called. Kani, being compiler-driven, has no such limit.
+//!
+//! Also inherent to the approach: concrete enumeration cannot span astronomically large domains (tier 5
+//! exists for that, at the cost of `Unknown` answers where the interval abstraction loses precision),
+//! and a passing verdict can still be hollow — see [`Verdict::is_vacuous`].
+//!
+//! So `aion_verify` is the everyday, zero-dependency engine for bounded invariants and automatic
+//! arithmetic safety, and **Kani remains the independent, third-party formal check**. It complements
+//! Kani; it does not replace it.
 //!
 //! `no_std`, `#![forbid(unsafe_code)]`.
 #![forbid(unsafe_code)]
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
+
+/// Automatic safety checking — panics (index-out-of-bounds, overflow, `unwrap`, division by zero)
+/// found without writing a predicate, the way a bounded model checker does. Requires the `std`
+/// feature. See [`safety`].
+#[cfg(feature = "std")]
+pub mod safety;
 
 /// TIER 5 — symbolic verification over unbounded domains (interval abstract interpretation). Proves
 /// properties over *all* of `u64` without enumerating it, entirely in first-party Rust. See [`symbolic`].
